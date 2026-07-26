@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import DailyIframe, { type DailyCall } from "@daily-co/daily-js";
+import { useEffect, useRef, useState } from "react";
+import { useLiveCall, type Part } from "./use-live-call";
+import { useLiveSession } from "./LiveSession";
+import { Video, Audio } from "./media";
 
 export type RosterMember = { patientId: string; name: string; initials: string };
 
@@ -24,6 +26,11 @@ export type LiveRoomProps = {
    */
   tileAction?: (member: RosterMember, joined: boolean) => React.ReactNode;
   /**
+   * Patient ids currently being driven by the dev-only AI simulator, so their transcript lines can
+   * be labelled as synthetic. Undefined in production — real sessions have no simulated speakers.
+   */
+  simulatedIds?: string[];
+  /**
    * Server-rendered state so the room survives a tab switch. Everything below used to live only in
    * component state, so navigating away and back reset the transcript and every speaking timer to
    * zero even though the session was still running and the data was already persisted.
@@ -35,18 +42,6 @@ export type LiveRoomProps = {
   patientName?: string;
   groupLabel?: string;
   therapistInitials?: string;
-};
-
-// Live participant state, keyed by Daily session_id.
-type Part = {
-  sessionId: string;
-  userId: string;
-  userName: string;
-  local: boolean;
-  videoOn: boolean;
-  audioOn: boolean;
-  track: MediaStreamTrack | null;
-  audioTrack: MediaStreamTrack | null;
 };
 
 const BAR_COLORS = ["#2fa4b8", "#5ac0cd", "#e8875a", "#d9a441", "#7fb87f", "#c98bb0", "#8f9fd0", "#63b3a4"];
@@ -64,262 +59,53 @@ function fmtClock(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// Attaches a MediaStreamTrack to a <video> element.
-function Video({ track, muted, className }: { track: MediaStreamTrack; muted?: boolean; className?: string }) {
-  const ref = useRef<HTMLVideoElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.srcObject = new MediaStream([track]);
-    void el.play().catch(() => {});
-    return () => { if (el) el.srcObject = null; };
-  }, [track]);
-  return <video ref={ref} autoPlay playsInline muted={muted} className={className} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
-}
-
-// Plays a remote audio track (call-object mode does not auto-play remote audio).
-function Audio({ track }: { track: MediaStreamTrack }) {
-  const ref = useRef<HTMLAudioElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.srcObject = new MediaStream([track]);
-    void el.play().catch(() => {});
-    return () => { if (el) el.srcObject = null; };
-  }, [track]);
-  return <audio ref={ref} autoPlay />;
-}
-
 export default function LiveRoom({
   roomUrl, token, sessionId,
   asrMode = "deepgram", canTranscribe = false,
   variant = "patient", roster = [], cohortName = "", sessionIndex, facilitatorName = "Facilitator",
-  onLeaveHref, tileAction, initialSpeaking, initialTranscript,
+  onLeaveHref, tileAction, simulatedIds, initialSpeaking, initialTranscript,
   myPatientId, patientName = "you", groupLabel = "Group", therapistInitials = "DC",
 }: LiveRoomProps) {
-  const callRef = useRef<DailyCall | null>(null);
-  const [parts, setParts] = useState<Record<string, Part>>({});
-  const [speaking, setSpeaking] = useState<Record<string, number>>(initialSpeaking ?? {}); // userId -> ms
-  // Live transcript, seeded from what's already persisted for this session.
-  const [transcript, setTranscript] = useState<{ patientId: string; text: string }[]>(initialTranscript ?? []);
-  const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null); // session_id
-  const [elapsed, setElapsed] = useState(0);
-  const [joined, setJoined] = useState(false);
-  const [micOn, setMicOn] = useState(variant === "facilitator");
-  const [camOn, setCamOn] = useState(variant === "facilitator");
-  // Why this exists: without it, every way the camera can fail to produce a track — permission
-  // denied, device already in use, no device at all — renders identically as "Camera starting…"
-  // and never resolves. On a freshly deployed origin the browser re-prompts for permission, so
-  // this is the first thing a clinician hits.
-  const [deviceError, setDeviceError] = useState<string | null>(null);
-  const [left, setLeft] = useState(false);
+  // The facilitator's call belongs to the therapist shell so it survives navigating to a cohort
+  // mid-session (LiveSession.tsx). Patient and group views have no shell above them and run their
+  // own. `useLiveCall(null)` is inert, so exactly one of the two is ever connected.
+  const session = useLiveSession();
+  const persistent = variant === "facilitator" && !!session;
+
+  const cfg = {
+    roomUrl, token, sessionId, asrMode, canTranscribe, variant,
+    onLeaveHref, initialSpeaking, initialTranscript, facilitatorName, cohortName, sessionIndex,
+    cohortId: onLeaveHref?.split("/cohort/")[1],
+  };
+  useEffect(() => {
+    if (persistent) session!.join(cfg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persistent, sessionId]);
+
+  const local = useLiveCall(persistent ? null : cfg);
+  const call = persistent ? session!.call : local;
+  const {
+    parts, speaking, transcript, activeSpeaker, elapsed, joined,
+    micOn, camOn, deviceError, asrState, asrError, micLevel, heardAudio, micDevice, left,
+    toggleMic, toggleCam, leave,
+  } = call;
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  // Presentational only — the group view's hand-raise and cheer affordances. Deliberately not in
+  // the call hook: they are per-view UI, not call state, and must not persist across navigation.
   const [handRaised, setHandRaised] = useState(false);
   const [cheered, setCheered] = useState(false);
-
-  // Seeded so the per-member timers continue from what's already on the server rather than
-  // restarting at 0:00 every time the clinician navigates back into the room.
-  const speakingRef = useRef<Record<string, number>>({ ...(initialSpeaking ?? {}) });
-  const activeRef = useRef<string | null>(null);
-
-  const refresh = useCallback(() => {
-    const call = callRef.current;
-    if (!call) return;
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const raw = call.participants() as any;
-    const next: Record<string, Part> = {};
-    for (const key of Object.keys(raw)) {
-      const p = raw[key];
-      const vid = p?.tracks?.video;
-      const aud = p?.tracks?.audio;
-      const videoOn = vid?.state === "playable";
-      const audioOn = aud?.state === "playable";
-      next[p.session_id] = {
-        sessionId: p.session_id,
-        userId: p.user_id || (p.local ? "local" : p.session_id),
-        userName: p.user_name || "",
-        local: !!p.local,
-        videoOn,
-        audioOn,
-        track: videoOn ? (vid?.persistentTrack ?? vid?.track ?? null) : null,
-        audioTrack: audioOn ? (aud?.persistentTrack ?? aud?.track ?? null) : null,
-      };
-    }
-    /* eslint-enable @typescript-eslint/no-explicit-any */
-    setParts(next);
-  }, []);
-
+  // Keep the newest line in view. The panel is seeded with up to 100 rehydrated segments, so
+  // without this a clinician speaking into a session that already has history watches their own
+  // words land out of sight and concludes capture is broken — the words were there the whole time,
+  // just scrolled past.
   useEffect(() => {
-    let disposed = false;
-    let flushAll: (() => void) | undefined;
-    let evInterval: number | undefined;
-    let tick: number | undefined;
-
-    const setup = async () => {
-      const stale = DailyIframe.getCallInstance();
-      if (stale) await stale.destroy().catch(() => {});
-      if (disposed) return;
-      if (DailyIframe.getCallInstance()) return;
-
-      const call = DailyIframe.createCallObject({ subscribeToTracksAutomatically: true });
-      callRef.current = call;
-
-      const t0 = Date.now();
-      const evBuf: { patientId: string; type: string; atMs: number }[] = [];
-      const txBuf: { patientId: string; text: string; startMs: number; endMs: number }[] = [];
-      const rec = (uid: string | undefined, type: string) => { if (uid) evBuf.push({ patientId: uid, type, atMs: Date.now() - t0 }); };
-
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      const onChange = () => refresh();
-      call.on("joined-meeting", () => { setJoined(true); refresh(); });
-      call.on("participant-joined", (e: any) => { rec(e?.participant?.user_id, "JOIN"); refresh(); });
-      call.on("participant-updated", onChange);
-      call.on("participant-left", (e: any) => { rec(e?.participant?.user_id, "LEAVE"); refresh(); });
-      call.on("track-started", (e: any) => {
-        if (e?.track?.kind === "video") rec(e?.participant?.user_id, "CAMERA_ON");
-        // Our own devices came up after a failure (e.g. the clinician granted permission and
-        // retried) — drop the warning rather than leaving it stale on screen.
-        if (e?.participant?.local) setDeviceError(null);
-        refresh();
-      });
-      call.on("track-stopped", (e: any) => { if (e?.track?.kind === "video") rec(e?.participant?.user_id, "CAMERA_OFF"); refresh(); });
-      call.on("app-message", (e: any) => {
-        // Daily delivers live transcription over app-message with fromId "transcription", not a
-        // participant id. Recording those as CHAT invents a patient that doesn't exist and inflates
-        // chat counts — recomputeEngagement() groups by patientId, so it even mints an
-        // EngagementMetric row for it. Only real participants count as chat.
-        if (!e?.fromId || e.fromId === "transcription") return;
-        rec(e.fromId, "CHAT");
-      });
-      call.on("camera-error", (e: any) => {
-        // Daily reports the blocked/failed device here. `type` is the useful part
-        // ("permissions", "not-found", "in-use"); errorMsg carries the browser's own wording.
-        const type = e?.error?.type as string | undefined;
-        const detail = e?.errorMsg?.errorMsg || e?.error?.localizedMsg;
-        setDeviceError(
-          type === "permissions"
-            ? "Camera and mic are blocked for this site. Allow them in your browser's address-bar permissions, then rejoin."
-            : type === "not-found"
-            ? "No camera or microphone was found on this device."
-            : type === "in-use"
-            ? "Your camera or mic is already in use by another app. Close it, then rejoin."
-            : // Unrecognised type: still give an action rather than echoing Daily's raw wording
-              // ("Unknown device error (NotSupportedError)"), which tells a clinician nothing.
-              `Camera and mic could not start — check this site's permissions and that no other app is using them.${detail ? ` (${detail})` : ""}`
-        );
-      });
-      call.on("active-speaker-change", (e: any) => {
-        const peer = e?.activeSpeaker?.peerId ?? null;
-        activeRef.current = peer;
-        setActiveSpeaker(peer);
-      });
-      // EVERY client captures, not just the facilitator. Daily broadcasts transcription-message to
-      // all participants, so making the clinician's tab the only recorder made it a single point of
-      // failure: if they reloaded or closed it mid-session, capture stopped for the whole room and
-      // nothing recovered the gap. With every client posting, the ingest route de-duplicates
-      // (see api/session/[sessionId]/transcript) and any one client surviving is enough.
-      //
-      // Timestamps come from Daily's server-assigned `timestamp`, NOT `Date.now() - t0`: t0 is each
-      // client's own join time, so a relative clock differs per capturer and the same utterance
-      // would never dedupe. It also means a clinician who joins late no longer skews the timeline.
-      if (asrMode === "daily") {
-        call.on("transcription-message", (e: any) => {
-          // participants() keys the local participant under "local", not their session_id, so a
-          // plain lookup resolves everyone EXCEPT yourself — which silently made each client unable
-          // to capture its own speech. Fall back to the local record when the id matches.
-          const parts = (call.participants() as any) ?? {};
-          const speaker = parts[e?.participantId] ?? (parts.local?.session_id === e?.participantId ? parts.local : undefined);
-          const uid = speaker?.user_id as string | undefined;
-          if (!uid || !e?.text) return;
-          const at = e?.timestamp ? new Date(e.timestamp).getTime() : Date.now();
-          txBuf.push({ patientId: uid, text: e.text, startMs: at, endMs: at });
-          // Also surface it on screen. Capture and display were separate concerns before: the
-          // transcript was persisted correctly but nothing ever rendered it, which is why it
-          // looked like transcription only worked during AI simulation (which has its own panel).
-          setTranscript((prev) => [...prev.slice(-199), { patientId: uid, text: e.text }]);
-        });
-      }
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-
-      const post = (url: string, payload: string) => {
-        if (navigator.sendBeacon) navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));
-        else void fetch(url, { method: "POST", body: payload, headers: { "Content-Type": "application/json" }, keepalive: true });
-      };
-      flushAll = () => {
-        if (evBuf.length) post(`/api/session/${sessionId}/events`, JSON.stringify({ events: evBuf.splice(0) }));
-        if (txBuf.length) post(`/api/session/${sessionId}/transcript`, JSON.stringify({ segments: txBuf.splice(0) }));
-      };
-      evInterval = window.setInterval(flushAll, 5000);
-
-      // 1s tick: timer + accrue speaking time to the current active speaker.
-      tick = window.setInterval(() => {
-        setElapsed((s) => s + 1);
-        const active = activeRef.current;
-        if (active) {
-          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-          const uid = (call.participants() as any)?.[active]?.user_id as string | undefined;
-          if (uid) {
-            speakingRef.current[uid] = (speakingRef.current[uid] ?? 0) + 1000;
-            setSpeaking({ ...speakingRef.current });
-          }
-        }
-      }, 1000);
-
-      const joinErr = await call
-        .join({
-          url: roomUrl, token,
-          startVideoOff: variant !== "facilitator",
-          startAudioOff: variant !== "facilitator",
-        })
-        .then(() => null)
-        .catch((e: unknown) => (e instanceof Error ? e.message : "could not join the room"));
-      if (disposed) return;
-      if (joinErr) setDeviceError(joinErr);
-
-      // The room is created with start_video_off / start_audio_off true so teens arrive muted
-      // until they're ready (docs/cpaas-integration.md §3). daily-js forwards the join-time
-      // overrides to the server-side call machine rather than acting on them locally, so the
-      // facilitator — who should arrive live — otherwise comes up with no camera or mic despite
-      // startVideoOff:false above, and the tile sits on "Camera starting…" forever. Re-assert
-      // explicitly once we're actually in. Same fix bot-fleet.ts needs for its synthetic mic.
-      if (variant === "facilitator" && !joinErr) {
-        call.setLocalVideo(true);
-        call.setLocalAudio(true);
-      }
-      refresh();
-      if (asrMode === "daily" && canTranscribe) { try { call.startTranscription(); } catch {} }
-    };
-
-    void setup();
-
-    return () => {
-      disposed = true;
-      if (evInterval) window.clearInterval(evInterval);
-      if (tick) window.clearInterval(tick);
-      flushAll?.();
-      const call = callRef.current;
-      // Deliberately NOT stopping transcription here. Unmount fires on any navigation or reload,
-      // and stopping is room-wide — one clinician refresh used to kill capture for every
-      // participant. Daily ends transcription when the room empties or expires, which is the
-      // correct lifetime for it.
-      call?.destroy().catch(() => {});
-      callRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const toggleMic = () => {
-    const call = callRef.current; if (!call) return;
-    const next = !micOn; setMicOn(next); call.setLocalAudio(next);
-  };
-  const toggleCam = () => {
-    const call = callRef.current; if (!call) return;
-    const next = !camOn; setCamOn(next); call.setLocalVideo(next);
-  };
-  const leave = () => {
-    setLeft(true);
-    callRef.current?.leave().catch(() => {});
-    if (onLeaveHref) window.location.href = onLeaveHref;
-  };
+    const el = transcriptRef.current;
+    if (!el) return;
+    // Newest line renders first, so "latest visible" means the TOP of the list. Only snap back up
+    // when the reader is already near the top — scrolling down through older lines must not be
+    // yanked away the moment someone says something.
+    if (el.scrollTop < 80) el.scrollTop = 0;
+  }, [transcript]);
 
   const byUser: Record<string, Part> = {};
   let localPart: Part | undefined;
@@ -336,12 +122,20 @@ export default function LiveRoom({
   // when the browser never acquired the device (blocked permission, or another tab already
   // holding it — the common case when you open the therapist and patient views side by side).
   // The button now reports the PUBLISHED track, so green means the room can actually hear you.
+  // Publishing a track, but every sample so far has been silence. `elapsed` gates it so the
+  // warning can't fire in the first seconds before the device has settled or anyone has spoken.
+  const micSilent = joined && micOn && micLive && !heardAudio && elapsed > 12;
   const micStalled = joined && micOn && !micLive;
-  const micLabel = !micOn ? "🔇 Mic off" : micStalled ? "⚠️ Mic not live" : "🎤 Mic on";
-  const micBg = !micOn ? "#5a2530" : micStalled ? "#6b4a18" : "#1e4a56";
+  const micLabel = !micOn ? "🔇 Mic off" : micStalled ? "⚠️ Mic not live" : micSilent ? "⚠️ No sound" : "🎤 Mic on";
+  const micBg = !micOn ? "#5a2530" : micStalled || micSilent ? "#6b4a18" : "#1e4a56";
   const micHint = micStalled
     ? "Your mic isn't reaching the room. Another tab or app is probably holding it — close it, then toggle the mic off and on."
+    : micSilent
+    ? "Your mic is connected but no sound is reaching the room — the input level has been flat since you joined. Check which microphone this site is using (address-bar icon → Microphone) and your system input volume."
     : null;
+  // A live mic with dead transcription reads to a clinician as a broken mic, because the transcript
+  // is the only visible evidence they're being heard. Name the real fault instead.
+  const asrDown = asrMode === "daily" && canTranscribe && (asrState === "off" || asrState === "error");
 
   // Remote audio must be attached to <audio> elements ourselves in call-object mode.
   const remoteAudio = Object.values(parts)
@@ -364,7 +158,8 @@ export default function LiveRoom({
       facilitatorName.split(" ").filter((w) => w && !w.endsWith(".")).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "YOU";
 
     return (
-      <div className="flex flex-col h-full" style={{ background: "#0e2029" }}>
+      <>
+        <div className="flex flex-col rounded-2xl overflow-hidden" style={{ height: "80vh", border: "1px solid #1e3a44", background: "#0e2029" }}>
         {remoteAudio}
         {/* Header */}
         <div className="flex items-center justify-between px-7 py-4 border-b" style={{ borderColor: "#1e3a44", color: "#cfe0e2" }}>
@@ -400,7 +195,7 @@ export default function LiveRoom({
           {/* Main column: participant grid + capture/consent band below it */}
           <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Tile grid */}
-          <div className="flex-1 grid gap-2.5 p-4 overflow-y-auto content-start" style={{ gridTemplateColumns: "repeat(3, 1fr)", gridAutoRows: "minmax(150px, 1fr)" }}>
+          <div className="flex-1 grid gap-2.5 p-4 overflow-y-auto content-start" style={{ gridTemplateColumns: "repeat(3, 1fr)", gridAutoRows: "minmax(128px, 1fr)" }}>
             {roster.map((m) => {
               const p = byUser[m.patientId];
               const joinedMember = !!p;
@@ -464,8 +259,28 @@ export default function LiveRoom({
                   title={!micOn ? "Mic off" : micLive ? (speakingNow ? "Speaking" : "Mic live") : "Mic not publishing"}
                 />
                 <span className="text-[13px] font-semibold" style={{ color: "#cfe0e2", textShadow: "0 1px 3px rgba(0,0,0,0.5)" }}>{facilitatorName} (you)</span>
+                {/* Live input meter. The one control that answers "can the room actually hear me?"
+                    without waiting on a transcript — it moves the instant you speak. */}
+                {joined && micOn && micLive && (
+                  <span className="inline-flex items-center gap-[2px] h-3" title={`Input level ${(micLevel * 100).toFixed(0)}%`}>
+                    {[0.02, 0.08, 0.18, 0.32, 0.5].map((threshold, i) => (
+                      <span
+                        key={i}
+                        className="w-[3px] rounded-full"
+                        style={{
+                          height: `${5 + i * 2}px`,
+                          background: micLevel >= threshold ? "#4bbf93" : "#2a4a54",
+                          transition: "background 0.1s",
+                        }}
+                      />
+                    ))}
+                  </span>
+                )}
                 {joined && micOn && !micLive && (
                   <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ color: "#3a2f18", background: "#e8a44b" }}>mic not live</span>
+                )}
+                {micSilent && (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ color: "#3a2f18", background: "#e8a44b" }}>no sound</span>
                 )}
               </div>
             </div>
@@ -489,62 +304,110 @@ export default function LiveRoom({
                 </div>
               ))}
             </div>
-            {/* Live transcript. The words were always being captured and persisted — there was
-                simply nothing rendering them, so the only place a clinician ever saw a transcript
-                was the dev-only AI-simulator panel. Seeded from the server so it survives leaving
-                and re-entering the room mid-session. */}
-            <div className="mt-4 shrink-0 flex flex-col" style={{ maxHeight: "38%" }}>
-              <div className="text-[12px] font-semibold uppercase tracking-wider mb-2 flex items-center gap-2" style={{ color: "#6a8b93" }}>
+          </aside>
+        </div>
+
+        {/* Control bar */}
+        <div className="flex items-center justify-between px-7 py-3" style={{ background: "#0b1a20", borderTop: "1px solid #1e3a44" }}>
+          <div className="text-[12px]" style={{ color: deviceError || micHint || asrDown ? "#e59a86" : "#7f9aa1" }}>
+            {/* Mic first: a blocked mic is what stops the room hearing you, and the camera error
+                that usually accompanies it is the less useful half of the message. Dead
+                transcription ranks next — your mic works, but nothing is being captured. */}
+            {micHint
+              ? micHint
+              : deviceError
+              ? deviceError
+              : asrDown
+              ? "Your mic is live, but transcription isn't running — nothing said in this session is being captured."
+              : joined
+              ? "You're connected — members join from their own app."
+              : "Connecting you to the room…"}
+            {/* Name the actual input. The level meter says "the room hears something"; this says
+                WHERE from, which is the difference between the built-in mic picking up your
+                speakers and a headset picking up you. */}
+            {joined && micOn && micDevice && (
+              <span className="ml-2" style={{ color: "#7f9aa1" }}>
+                · mic: <span style={{ color: "#cfe0e2" }}>{micDevice}</span>
+              </span>
+            )}
+          </div>
+          {/* shrink-0: the mic-silence explanation is long enough to squeeze the controls onto two
+              lines otherwise. The text wraps; the buttons must not move. */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button onClick={toggleMic} title={micHint ?? undefined} className="rounded-full px-4 py-2 text-[13px] font-semibold whitespace-nowrap" style={{ background: micBg, color: "#fff" }}>{micLabel}</button>
+            <button onClick={toggleCam} className="rounded-full px-4 py-2 text-[13px] font-semibold whitespace-nowrap" style={{ background: camOn ? "#1e4a56" : "#5a2530", color: "#fff" }}>{camOn ? "📷 Camera on" : "🚫 Camera off"}</button>
+            <button onClick={leave} className="rounded-full px-5 py-2 text-[13px] font-bold text-white whitespace-nowrap" style={{ background: "#c1445b" }}>Leave room</button>
+          </div>
+        </div>
+        </div>{/* end room card */}
+
+        {/* Live transcript — its own section below the room card, not inside the video area.
+            It began life in the telemetry sidebar as a ~200px box under the speaking-time bars:
+            three or four lines at a time, and in any session with history the newest line sat
+            permanently below the fold, so a clinician speaking saw nothing appear and reasonably
+            concluded capture was broken. The sidebar is now purely per-participant status.
+            Seeded from the server so it survives leaving and re-entering mid-session. */}
+        <div className="mt-3 rounded-2xl p-5 flex flex-col" style={{ background: "#12303a", border: "1px solid #1e4a56", maxHeight: "56vh" }}>
+              <div className="text-[12px] font-semibold uppercase tracking-wider mb-2 flex items-center gap-2 shrink-0" style={{ color: "#6a8b93" }}>
                 Transcript
-                {asrMode !== "daily" && (
+                {asrMode !== "daily" ? (
                   <span className="text-[10px] font-medium normal-case px-1.5 py-0.5 rounded" style={{ color: "#e8c58a", background: "#3a2f18" }}>batch mode</span>
-                )}
+                ) : asrDown ? (
+                  <span className="text-[10px] font-medium normal-case px-1.5 py-0.5 rounded" style={{ color: "#f0a3b1", background: "#4a1f28" }}>not running</span>
+                ) : asrState === "on" ? (
+                  <span className="text-[10px] font-medium normal-case px-1.5 py-0.5 rounded" style={{ color: "#bfe9d5", background: "#12463a" }}>live</span>
+                ) : null}
               </div>
-              <div className="flex-1 overflow-y-auto flex flex-col gap-2 -mr-2 pr-2 text-[12.5px] leading-relaxed">
-                {transcript.length === 0 ? (
+              <div ref={transcriptRef} className="flex-1 overflow-y-auto flex flex-col gap-2 -mr-2 pr-2 text-[12.5px] leading-relaxed">
+                {asrDown && transcript.length === 0 ? (
+                  // The failure mode this replaces: a silent "Nothing yet" while the clinician
+                  // talked into a mic that was publishing perfectly well.
+                  <div style={{ color: "#f0a3b1" }}>
+                    Live transcription isn&apos;t running on this room, so nothing spoken is being captured.
+                    {asrError ? <span style={{ color: "#c98a97" }}> ({asrError})</span> : null}
+                    <span style={{ color: "#8aa2a8" }}> Transcription has to be enabled on the Daily domain — see docs/technical-design.md.</span>
+                  </div>
+                ) : micSilent && transcript.length === 0 ? (
+                  // Transcription is healthy — the room just isn't receiving any sound to transcribe.
+                  <div style={{ color: "#e8c05a" }}>
+                    Transcription is running, but no sound is reaching the room from your mic — so there&apos;s nothing to
+                    transcribe. Check which microphone this site is using, then toggle the mic off and on.
+                  </div>
+                ) : transcript.length === 0 ? (
                   <div style={{ color: "#5f8089" }}>Nothing yet — lines appear as people speak.</div>
                 ) : (
-                  transcript.slice(-40).map((line, i) => {
+                  // Newest first. slice() already returns a copy, so reversing it here doesn't
+                  // touch the state array.
+                  transcript.slice(-40).reverse().map((line, i) => {
                     const who = line.patientId.startsWith("clinician-")
                       ? facilitatorName
                       : roster.find((m) => m.patientId === line.patientId)?.name ?? "Member";
+                    // Marks a line as coming from the dev-only simulator rather than a real teen.
+                    // This is the only place that distinction is now visible, so it has to sit on
+                    // the line itself — a reader scanning the transcript must never mistake
+                    // synthetic speech for something a patient actually said.
+                    const isSim = simulatedIds?.includes(line.patientId);
                     return (
                       <div key={`${i}-${line.text.slice(0, 12)}`}>
-                        <span className="font-semibold" style={{ color: "#8fd0da" }}>{who}: </span>
+                        <span className="font-semibold" style={{ color: "#8fd0da" }}>{who}</span>
+                        {isSim && (
+                          <span
+                            className="ml-1.5 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded align-[1px]"
+                            style={{ color: "#3a3016", background: "#e8c05a" }}
+                            title="Simulated by AI — not a real patient"
+                          >
+                            AI
+                          </span>
+                        )}
+                        <span className="font-semibold" style={{ color: "#8fd0da" }}>: </span>
                         <span style={{ color: "#cfe0e2" }}>{line.text}</span>
                       </div>
                     );
                   })
                 )}
               </div>
-            </div>
-            <div className="rounded-[10px] p-3.5 mt-4 shrink-0" style={{ background: "#16394480", border: "1px solid #1e4a56" }}>
-              <div className="text-[13px] font-semibold text-white mb-1">Captured for review</div>
-              <div className="text-[12px] leading-relaxed" style={{ color: "#9db8bd" }}>Streams post to Note review the moment you end the session.</div>
-            </div>
-          </aside>
         </div>
-
-        {/* Control bar */}
-        <div className="flex items-center justify-between px-7 py-3" style={{ background: "#0b1a20", borderTop: "1px solid #1e3a44" }}>
-          <div className="text-[12px]" style={{ color: deviceError || micHint ? "#e59a86" : "#7f9aa1" }}>
-            {/* Mic first: a blocked mic is what stops the room hearing you, and the camera error
-                that usually accompanies it is the less useful half of the message. */}
-            {micHint
-              ? micHint
-              : deviceError
-              ? deviceError
-              : joined
-              ? "You're connected — members join from their own app."
-              : "Connecting you to the room…"}
-          </div>
-          <div className="flex items-center gap-2.5">
-            <button onClick={toggleMic} title={micHint ?? undefined} className="rounded-full px-4 py-2 text-[13px] font-semibold" style={{ background: micBg, color: "#fff" }}>{micLabel}</button>
-            <button onClick={toggleCam} className="rounded-full px-4 py-2 text-[13px] font-semibold" style={{ background: camOn ? "#1e4a56" : "#5a2530", color: "#fff" }}>{camOn ? "📷 Camera on" : "🚫 Camera off"}</button>
-            <button onClick={leave} className="rounded-full px-5 py-2 text-[13px] font-bold text-white" style={{ background: "#c1445b" }}>Leave room</button>
-          </div>
-        </div>
-      </div>
+      </>
     );
   }
 

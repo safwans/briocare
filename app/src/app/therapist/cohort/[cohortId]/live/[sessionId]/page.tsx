@@ -143,7 +143,9 @@ export default async function ClinicianLivePage({
         {simEnabled() ? (
           <LiveRoomWithSimLazy {...liveRoomProps} />
         ) : (
-          <div className="mt-4 rounded-2xl overflow-hidden border" style={{ height: "80vh", borderColor: "#1e3a44" }}>
+          // No height/border wrapper: the facilitator view owns its own room card so it can render
+          // the transcript as a separate section beneath it rather than inside the video area.
+          <div className="mt-4">
             <LiveRoom {...liveRoomProps} />
           </div>
         )}
