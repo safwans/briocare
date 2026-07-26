@@ -22,6 +22,12 @@ function ageFromDob(dob: Date): number {
   return a;
 }
 
+/**
+ * Which of the three dashboard card states a cohort is in. One value drives the pill, the accent,
+ * the CTA label and the CTA destination, so those four can't drift out of agreement.
+ */
+export type CohortSessionState = "live" | "upcoming" | "notes-due";
+
 export type CohortCard = {
   id: string;
   code: string;
@@ -30,10 +36,15 @@ export type CohortCard = {
   ageLow: number;
   ageHigh: number;
   focus: string;
+  meetsOn: string;
+  meetsAt: string;
   liveSession: { index: number } | null;
   liveSessionId: string | null;
   currentSessionId: string | null;
   latestIndex: number | null;
+  nextIndex: number | null;
+  totalSessions: number;
+  sessionState: CohortSessionState;
   module: string;
   checkIns: number;
   notesToReview: number;
@@ -89,6 +100,16 @@ export const getDashboard = cache(async (): Promise<Dashboard | null> => {
     // Live room targets the actionable session: live now → next upcoming → last completed.
     const nextScheduled = c.sessions.filter((s) => s.status === "SCHEDULED").sort((a, b) => a.index - b.index)[0] ?? null;
     const current = live ?? nextScheduled ?? latestCompleted ?? c.sessions[0];
+    // Pending notes outrank an upcoming session on purpose: the "Review notes" CTA is only worth
+    // offering when there is something to review, and unreviewed notes are the work that's already
+    // owed. A cohort with neither falls back to "notes-due" so the card still points somewhere.
+    const sessionState: CohortSessionState = live
+      ? "live"
+      : notesToReview > 0
+        ? "notes-due"
+        : nextScheduled
+          ? "upcoming"
+          : "notes-due";
     cards.push({
       id: c.id,
       code: c.code,
@@ -97,10 +118,15 @@ export const getDashboard = cache(async (): Promise<Dashboard | null> => {
       ageLow: c.ageBandLow,
       ageHigh: c.ageBandHigh,
       focus: c.focus,
+      meetsOn: c.meetsOn,
+      meetsAt: c.meetsAt,
       liveSession: live ? { index: live.index } : null,
       liveSessionId: live?.id ?? null,
       currentSessionId: current?.id ?? null,
       latestIndex: latestCompleted?.index ?? null,
+      nextIndex: nextScheduled?.index ?? null,
+      totalSessions: c.sessions.length,
+      sessionState,
       module: current?.module ?? "",
       checkIns,
       notesToReview,

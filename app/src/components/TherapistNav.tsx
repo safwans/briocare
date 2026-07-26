@@ -16,13 +16,14 @@ export type NavCohort = {
   currentSessionId: string | null;
   liveSessionId: string | null;
   notesToReview: number;
+  checkIns: number;
 };
 
 const ACCENTS = ["#2fa4b8", "#4a90a4", "#6bb1bd", "#5a9bb0", "#7fb1bd"];
 const dayOf = (name: string) => name.split(" ")[0];
 
-// Active-cohort dropdown + the 4-step Session Workflow (Cohort review → Session prep → Live room →
-// Note review), scoped to the active cohort. Matches the therapist design mock.
+// Active-cohort dropdown + the 3-step Session Workflow (Cohort → Live room → Note review), scoped
+// to the active cohort. Matches the therapist design mock.
 export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavCohort[]; homeBadge?: number }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
@@ -51,49 +52,58 @@ export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavC
   return (
     <>
       {/* Home */}
-      <div className="mt-4 px-4">
-        <Link
-          href="/therapist"
-          className={`flex items-center gap-2 rounded-lg px-3 py-2 font-semibold text-sm ${onHome ? "bg-[#1c7b8c] text-white" : "text-slate-200 hover:bg-[#12303a]"}`}
-        >
-          <span>▤ Home</span>
-          {homeBadge > 0 && (
-            <span className="ml-auto grid place-items-center min-w-5 h-5 px-1 rounded-full bg-[#b8556a] text-white text-[11px] font-semibold">{homeBadge}</span>
-          )}
-        </Link>
-      </div>
+      <Link
+        href="/therapist"
+        className={`flex items-center rounded-[10px] px-3 py-[9px] text-[15px] font-semibold ${onHome ? "bg-[#1c7b8c] text-white" : "text-[#a9c6cc] hover:bg-[#163944]"}`}
+      >
+        <span className="relative w-[15px] h-[15px] rounded shrink-0 border-2 border-current mr-[11px]">
+          <span className="absolute left-0.5 right-0.5 top-[3px] h-0.5 bg-current" />
+        </span>
+        Home
+        {homeBadge > 0 && (
+          <span className="ml-auto grid place-items-center min-w-5 h-5 px-1 rounded-full bg-[#b8556a] text-white text-[11px] font-bold">{homeBadge}</span>
+        )}
+      </Link>
 
       {/* Cohort selector */}
-      <div className="mt-4 px-4">
-        <div className="text-[11px] uppercase tracking-wider text-slate-400 mb-1">{onHome ? "Cohort" : "Active cohort"}</div>
+      <div className="pt-[22px]">
+        <div className="px-2.5 pb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6a8b93]">
+          {onHome ? "Cohort" : "Active cohort"}
+        </div>
         <div className="relative">
+          {/* On home the trigger is the call to action — nothing else in the sidebar is reachable
+              until a cohort is picked, so it gets the accent treatment rather than an inset one. */}
           <button
             onClick={() => setOpen((o) => !o)}
-            className="w-full flex items-center gap-2 rounded-xl bg-[#12303a] px-3 py-2 text-left"
+            className={`w-full flex items-center gap-[11px] rounded-xl px-3 py-3 text-left border ${
+              onHome ? "bg-[#1c7b8c] border-[#2fa4b8] ring-[3px] ring-[#2fa4b8]/20" : "bg-[#163944] border-[#1e4a56]"
+            }`}
           >
-            <span className="w-[9px] h-8 rounded-full shrink-0" style={{ background: onHome ? "#3a5a64" : ACCENTS[activeIdx % ACCENTS.length] }} />
+            <span className="w-[9px] h-[30px] rounded shrink-0" style={{ background: onHome ? "#3a5a64" : ACCENTS[activeIdx % ACCENTS.length] }} />
             <span className="flex-1 min-w-0 leading-tight">
-              <span className="block text-sm font-semibold text-white truncate">{onHome ? "Select cohort" : titleOf(active)}</span>
-              <span className="block text-xs text-slate-400">{onHome ? `${cohorts.length} groups` : subOf(active)}</span>
+              <span className="block text-[13.5px] font-bold text-white truncate">{onHome ? "Select cohort" : titleOf(active)}</span>
+              <span className={`block text-[11.5px] ${onHome ? "text-[#bfe4ea]" : "text-[#7f9aa1]"}`}>
+                {onHome ? `${cohorts.length} ${cohorts.length === 1 ? "group" : "groups"}` : subOf(active)}
+              </span>
             </span>
-            <span className="text-slate-400 text-xs">{open ? "▲" : "▼"}</span>
+            <span className={`text-sm transition-transform ${open ? "rotate-180" : ""} ${onHome ? "text-white" : "text-[#7f9aa1]"}`}>▾</span>
           </button>
           {open && (
-            <div className="absolute z-10 mt-1 w-full rounded-xl bg-[#12303a] border border-[#1e4a56] overflow-hidden shadow-xl">
+            <div className="absolute z-30 top-[calc(100%+6px)] left-0 right-0 rounded-xl bg-[#0f2a33] border border-[#1e4a56] p-[5px] shadow-[0_18px_40px_-12px_rgba(0,0,0,0.55)]">
               {cohorts.map((c, i) => (
                 <Link
                   key={c.id}
                   href={`/therapist/cohort/${c.id}`}
                   onClick={() => setOpen(false)}
-                  className={`flex items-center gap-2 px-3 py-2 hover:bg-[#173e49] ${!onHome && c.id === active.id ? "bg-[#173e49]" : ""}`}
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2 hover:bg-[#173e49] ${!onHome && c.id === active.id ? "bg-[#173e49]" : ""}`}
                 >
-                  <span className="w-[9px] h-7 rounded-full shrink-0" style={{ background: ACCENTS[i % ACCENTS.length] }} />
+                  <span className="w-[7px] h-[26px] rounded shrink-0" style={{ background: ACCENTS[i % ACCENTS.length] }} />
                   <span className="flex-1 min-w-0 leading-tight">
-                    <span className="block text-sm font-medium text-white truncate">{titleOf(c)}</span>
-                    <span className="block text-xs text-slate-400">{subOf(c)}</span>
+                    <span className="block text-[13px] font-bold text-white truncate">{titleOf(c)}</span>
+                    <span className="block text-[11.5px] text-[#7f9aa1]">{subOf(c)}</span>
                   </span>
-                  {c.notesToReview > 0 && (
-                    <span className="grid place-items-center min-w-5 h-5 px-1 rounded-full bg-[#b8556a] text-white text-[11px] font-semibold">{c.notesToReview}</span>
+                  {c.checkIns > 0 && (
+                    <span className="grid place-items-center min-w-5 h-5 px-1 rounded-full bg-[#b8556a] text-white text-[11px] font-bold">{c.checkIns}</span>
                   )}
                 </Link>
               ))}
@@ -103,10 +113,10 @@ export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavC
       </div>
 
       {/* Session workflow */}
-      <div className="mt-5 px-4">
-        <div className="text-[11px] uppercase tracking-wider text-slate-400">Session workflow</div>
-        <div className="text-[11px] text-slate-500 mb-2">Cohort review → prep → live → notes</div>
-        <nav className="space-y-0.5">
+      <div className="pt-[22px]">
+        <div className="px-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6a8b93]">Session workflow</div>
+        <div className="px-2.5 pb-2.5 text-[11.5px] text-[#5f8089]">Cohort → live room → notes</div>
+        <nav className="flex flex-col gap-[3px]">
           {steps.map((s) =>
             onHome ? (
               // No cohort selected — steps are not actionable until one is picked.
@@ -114,21 +124,21 @@ export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavC
                 key={s.n}
                 aria-disabled
                 title="Select a cohort first"
-                className="flex items-center gap-3 rounded-lg px-2 py-2 opacity-40 cursor-not-allowed"
+                className="flex items-center gap-3 rounded-[10px] px-3 py-[9px] opacity-40 cursor-not-allowed"
               >
-                <span className="grid place-items-center w-6 h-6 rounded-full text-[11px] font-semibold border border-slate-600 text-slate-500">{s.n}</span>
-                <span className="flex-1 text-sm text-slate-400">{s.label}</span>
+                <span className="grid place-items-center w-6 h-6 rounded-full text-[11px] font-bold border border-[#3c5f6a] text-[#6a8b93]">{s.n}</span>
+                <span className="flex-1 text-[15px] font-semibold text-[#a9c6cc]">{s.label}</span>
               </div>
             ) : (
               <Link
                 key={s.n}
                 href={s.href}
-                className={`flex items-center gap-3 rounded-lg px-2 py-2 ${s.is ? "bg-[#12303a]" : "hover:bg-[#12303a]"}`}
+                className={`flex items-center gap-3 rounded-[10px] px-3 py-[9px] text-[15px] font-semibold ${s.is ? "bg-[#1c7b8c] text-white" : "text-[#a9c6cc] hover:bg-[#163944]"}`}
               >
-                <span className={`grid place-items-center w-6 h-6 rounded-full text-[11px] font-semibold ${s.is ? "bg-[#1c7b8c] text-white" : "border border-slate-600 text-slate-400"}`}>{s.n}</span>
-                <span className={`flex-1 text-sm ${s.is ? "text-white font-medium" : "text-slate-200"}`}>{s.label}</span>
+                <span className={`grid place-items-center w-6 h-6 rounded-full text-[11px] font-bold ${s.is ? "bg-white/20 text-white" : "border border-[#3c5f6a] text-[#a9c6cc]"}`}>{s.n}</span>
+                <span className="flex-1">{s.label}</span>
                 {s.badge && (
-                  <span className="grid place-items-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold" style={{ background: "#b8556a", color: "#fff" }}>
+                  <span className="grid place-items-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-bold" style={{ background: "#b8556a", color: "#fff" }}>
                     {s.badge.live ? "● live" : s.badge.text}
                   </span>
                 )}
