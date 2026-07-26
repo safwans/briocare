@@ -57,7 +57,7 @@ The rule is capture only: no prompts to the clinician, none to the teens, no rea
 
 **1 — Engagement.** Raw events become an `EngagementMetric` per teen: a weighted, soft-capped **participation index** over talk, turns, camera, presence and chat. Each input is capped so one loud member cannot saturate the score, and status comes from the delta against that teen's own `Baseline` — never against the cohort. Weights and caps are in `docs/engagement-spec.md`.
 
-**2 — Resolve a transcript, per teen.** Strict priority: live capture, then a recorded-audio URL, then synthetic fixtures. Only the first and third fire today (§7).
+**2 — Resolve a transcript, per teen.** Strict priority: live capture, then a recorded-audio URL, then synthetic fixtures. Only the first and third can fire — the middle branch needs a stored recording, and nothing in the product records audio (§4).
 
 **3 — Draft a grounded note,** four teens at a time. Claude writes four sections plus goal signals from that teen's transcript, their goals, the session module, and a one-line participation summary from step 1. It also returns `signalAlignment`, a verdict on whether the narrative and the measured signal agree — without it a note can read “engaged and forthcoming” while the caseload shows the same teen well below baseline, and a clinician skimming the prose never sees the contradiction.
 
