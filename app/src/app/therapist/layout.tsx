@@ -7,7 +7,7 @@ export default async function TherapistLayout({ children }: { children: React.Re
   const dash = await getDashboard();
   const initials = dash ? dash.clinicianName.split(" ").map((s) => s[0]).slice(-2).join("") : "–";
   const navCohorts: NavCohort[] = (dash?.cohorts ?? []).map((c) => ({
-    id: c.id, code: c.code, name: c.name, focus: c.focus,
+    id: c.id, code: c.code, focus: c.focus, meetsOn: c.meetsOn,
     members: c.members, ageLow: c.ageLow, ageHigh: c.ageHigh,
     currentSessionId: c.currentSessionId, liveSessionId: c.liveSessionId,
     notesToReview: c.notesToReview, checkIns: c.checkIns,

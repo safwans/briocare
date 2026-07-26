@@ -119,7 +119,10 @@ function CohortRow({ c }: { c: CohortCard }) {
             />
             {m.pill}
           </span>
-          <div className="mt-1 font-bold text-[19px] tracking-tight">{c.name}</div>
+          {/* Same title as the sidebar switcher and the cohort page, so the card a therapist
+              clicks and the cohort they land on read identically. Day/time live in the meta line
+              below — Cohort.name repeats them and isn't unique across cohorts. */}
+          <div className="mt-1 font-bold text-[19px] tracking-tight">{c.code} · {focusLabel(c.focus)}</div>
           <div className="text-[13px] text-[#9fb2b7] mt-0.5">
             Meets {c.meetsOn}s · {c.meetsAt} · {c.members} members
           </div>

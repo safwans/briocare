@@ -8,8 +8,8 @@ import { focusLabel } from "@/components/parts";
 export type NavCohort = {
   id: string;
   code: string;
-  name: string;
   focus: string;
+  meetsOn: string;
   members: number;
   ageLow: number;
   ageHigh: number;
@@ -20,7 +20,6 @@ export type NavCohort = {
 };
 
 const ACCENTS = ["#2fa4b8", "#4a90a4", "#6bb1bd", "#5a9bb0", "#7fb1bd"];
-const dayOf = (name: string) => name.split(" ")[0];
 
 // Active-cohort dropdown + the 3-step Session Workflow (Cohort → Live room → Note review), scoped
 // to the active cohort. Matches the therapist design mock.
@@ -39,8 +38,13 @@ export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavC
     cohorts[0];
   if (!active) return null;
   const activeIdx = Math.max(0, cohorts.findIndex((c) => c.id === active.id));
+  // `code · focus` is the one cohort title used everywhere (cohort page h1, live room, dashboard
+  // cards, admin) — Cohort.name is a generated "Monday PM · Social Anxiety" string that collides
+  // between cohorts sharing a day and focus, so it can't be the label a therapist picks from.
   const titleOf = (c: NavCohort) => `${c.code} · ${focusLabel(c.focus)}`;
-  const subOf = (c: NavCohort) => `${dayOf(c.name)}s · ${c.members} members`;
+  // From meetsOn, not the name's first word — a cohort named anything but "<Day> PM · …" (admin
+  // takes a free-text name) would otherwise print its first word plus an "s".
+  const subOf = (c: NavCohort) => `${c.meetsOn}s · ${c.members} members`;
 
   const base = `/therapist/cohort/${active.id}`;
   const steps = [

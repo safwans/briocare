@@ -98,8 +98,15 @@ export async function seedCohort(prisma: PrismaClient, opts: {
   // "how many sessions have happened" to "how many trend points a member has" — and always
   // produced one MORE session than asked for, because a SCHEDULED one is appended below.
   const sessionsPlayed = Math.min(opts.sessionsPlayed ?? opts.members[0].trend.length, opts.sessionCount);
-  const cohortCount = await prisma.cohort.count();
-  const code = `C-${String(cohortCount + 1).padStart(2, "0")}`;
+  // Next unused number, not count()+1: deleting a cohort in admin and adding another handed out a
+  // code already in use, so the sidebar listed two "C-03"s with no way to tell them apart. Codes
+  // are the cohort's identity in every title, so they have to stay distinct within an org.
+  const existing = await prisma.cohort.findMany({ where: { orgId: opts.orgId }, select: { code: true } });
+  const highest = existing.reduce((max, c) => {
+    const n = /^C-(\d+)$/.exec(c.code)?.[1];
+    return n ? Math.max(max, Number(n)) : max;
+  }, 0);
+  const code = `C-${String(highest + 1).padStart(2, "0")}`;
   const cohort = await prisma.cohort.create({
     data: {
       orgId: opts.orgId, code, name: opts.name, focus: opts.focus, meetsOn: opts.meetsOn,
