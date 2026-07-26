@@ -1,0 +1,42 @@
+# One-off job: apply pending Prisma migrations to the Cloud SQL database.
+#
+# The app image can only reach Cloud SQL over the unix socket Cloud Run mounts, so migrations
+# can't run from a workstation. This runs `prisma migrate deploy` inside Cloud Build with the
+# Cloud SQL Auth Proxy alongside it.
+#
+#   gcloud builds submit --config cloudbuild.migrate.yaml .
+#
+# Run it BEFORE deploying an image whose schema.prisma has changed. Skipping it is what caused
+# "Data truncated for column 'status'" — the app wrote an enum value the database didn't have.
+steps:
+  - name: node:22
+    entrypoint: bash
+    secretEnv: ["DB_PASSWORD"]
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        curl -sSL -o /usr/local/bin/cloud-sql-proxy \
+          https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
+        chmod +x /usr/local/bin/cloud-sql-proxy
+        cloud-sql-proxy --port 3306 "$$INSTANCE" &
+        for i in $(seq 1 30); do
+          (echo > /dev/tcp/127.0.0.1/3306) >/dev/null 2>&1 && break
+          sleep 1
+        done
+        export DATABASE_URL="mysql://briocare:$$DB_PASSWORD@127.0.0.1:3306/briocare"
+        corepack enable
+        pnpm install --frozen-lockfile --prod=false
+        pnpm prisma migrate deploy
+        pnpm prisma migrate status
+    env:
+      - "INSTANCE=crystalvision:us-central1:crystalvisionml3"
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/crystalvision/secrets/briocare-db-password/versions/latest
+      env: DB_PASSWORD
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s

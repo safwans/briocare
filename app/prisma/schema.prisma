@@ -1,0 +1,454 @@
+// BrioCare — Prisma schema (MVP). Source of truth: docs/data-model.md
+// Stack: MySQL (Cloud SQL / local Docker) · Prisma 7 (mariadb driver adapter) · Next.js + TS.
+// Entities marked (P2) are modeled now, enforced in Phase 2 (consent/compliance).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ---------- Tenancy & identity ----------
+
+enum UserRole {
+  ADMIN
+  THERAPIST
+  PATIENT
+  GUARDIAN
+}
+
+model Org {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  users     User[]
+  cohorts   Cohort[]
+  patients  Patient[]
+}
+
+model User {
+  id          String     @id @default(cuid())
+  orgId       String
+  org         Org        @relation(fields: [orgId], references: [id])
+  role        UserRole
+  email       String?    @unique
+  displayName String
+  authSubject String?    @unique
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  clinician   Clinician?
+  patient     Patient?
+}
+
+model Clinician {
+  id             String            @id @default(cuid())
+  userId         String            @unique
+  user           User              @relation(fields: [userId], references: [id])
+  credential     String
+  licensedStates Json              // e.g. ["CA","NY"] — JSON array (MySQL has no scalar-list columns)
+  cohorts        CohortClinician[]
+}
+
+// ---------- Program structure ----------
+
+enum ProgramFocus {
+  SOCIAL_ANXIETY
+  MOOD_DEPRESSION
+  EMOTION_REGULATION
+}
+
+enum CohortStatus {
+  FORMING
+  ACTIVE
+  DISCHARGED
+}
+
+model Cohort {
+  id           String            @id @default(cuid())
+  orgId        String
+  org          Org               @relation(fields: [orgId], references: [id])
+  code         String            @default("")
+  name         String
+  focus        ProgramFocus
+  meetsOn      String
+  meetsAt      String            @default("4:00 PM")
+  ageBandLow   Int
+  ageBandHigh  Int
+  sessionCount Int
+  status       CohortStatus      @default(FORMING)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  clinicians   CohortClinician[]
+  enrollments  Enrollment[]
+  sessions     Session[]
+}
+
+model CohortClinician {
+  cohortId    String
+  cohort      Cohort    @relation(fields: [cohortId], references: [id])
+  clinicianId String
+  clinician   Clinician @relation(fields: [clinicianId], references: [id])
+  role        String    @default("facilitator")
+  @@id([cohortId, clinicianId])
+}
+
+model Patient {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Org          @relation(fields: [orgId], references: [id])
+  userId      String?      @unique
+  user        User?        @relation(fields: [userId], references: [id])
+  firstName   String
+  lastName    String
+  dob         DateTime
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  enrollments Enrollment[]
+  guardians   Guardian[]
+}
+
+model Guardian {
+  id        String          @id @default(cuid())
+  orgId     String
+  patientId String
+  patient   Patient         @relation(fields: [patientId], references: [id])
+  name      String
+  contact   String
+  consents  ConsentRecord[]
+}
+
+enum EnrollmentStatus {
+  INVITED
+  ACTIVE
+  DISCHARGED
+  WITHDRAWN
+}
+
+model Enrollment {
+  id        String           @id @default(cuid())
+  cohortId  String
+  cohort    Cohort           @relation(fields: [cohortId], references: [id])
+  patientId String
+  patient   Patient          @relation(fields: [patientId], references: [id])
+  status    EnrollmentStatus @default(INVITED)
+  goals     Goal[]
+  baseline  Baseline?
+  @@unique([cohortId, patientId])
+}
+
+// ---------- Goals (clinical goal-progress axis; distinct from engagement) ----------
+
+enum GoalStatus {
+  MET
+  ON_TRACK
+  EMERGING
+  DECLINING
+  AT_RISK
+  OFF_TRACK
+}
+
+model Goal {
+  id           String     @id @default(cuid())
+  enrollmentId String
+  enrollment   Enrollment @relation(fields: [enrollmentId], references: [id])
+  text         String     @db.Text
+  status       GoalStatus @default(EMERGING)
+  order        Int
+}
+
+// ---------- Sessions, media, transcripts ----------
+
+enum SessionStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model Session {
+  id              String             @id @default(cuid())
+  cohortId        String
+  cohort          Cohort             @relation(fields: [cohortId], references: [id])
+  index           Int
+  module          String
+  scheduledAt     DateTime
+  status          SessionStatus      @default(SCHEDULED)
+  roomId          String?
+  attendance      Attendance[]
+  tracks          MediaTrack[]
+  events          EngagementEvent[]
+  metrics         EngagementMetric[]
+  individualNotes IndividualNote[]
+  groupNote       GroupNote?
+  riskFlags       RiskFlag[]
+}
+
+model Attendance {
+  id        String    @id @default(cuid())
+  sessionId String
+  session   Session   @relation(fields: [sessionId], references: [id])
+  patientId String
+  present   Boolean   @default(false)
+  joinedAt  DateTime?
+  leftAt    DateTime?
+  @@unique([sessionId, patientId])
+}
+
+model MediaTrack {
+  id         String      @id @default(cuid())
+  sessionId  String
+  session    Session     @relation(fields: [sessionId], references: [id])
+  patientId  String
+  gcsUri     String      @db.Text
+  durationS  Int?
+  transcript Transcript?
+  @@unique([sessionId, patientId])
+}
+
+model Transcript {
+  id           String     @id @default(cuid())
+  trackId      String     @unique
+  track        MediaTrack @relation(fields: [trackId], references: [id])
+  segments     Json
+  lowConfSpans Json
+}
+
+// ---------- Engagement ----------
+
+enum EngagementEventType {
+  JOIN
+  LEAVE
+  CAMERA_ON
+  CAMERA_OFF
+  SPEAKING_START
+  SPEAKING_END
+  CHAT
+}
+
+enum EngagementStatus {
+  ESTABLISHING
+  CHECK_IN
+  WORTH_A_LOOK
+  WATCH
+  STABLE
+  IMPROVING
+  // Enrolled but never joined. Distinct from a low score: "didn't attend" and "attended and was
+  // quiet" need different follow-up, and without this an absent teen simply had no metric row and
+  // kept showing last session's numbers.
+  ABSENT
+}
+
+model EngagementEvent {
+  id        String              @id @default(cuid())
+  sessionId String
+  session   Session             @relation(fields: [sessionId], references: [id])
+  patientId String
+  type      EngagementEventType
+  atMs      Int
+}
+
+model EngagementMetric {
+  id                 String           @id @default(cuid())
+  sessionId          String
+  session            Session          @relation(fields: [sessionId], references: [id])
+  patientId          String
+  talkS              Int
+  turns              Int
+  cameraOnPct        Int
+  presencePct        Int
+  chatCount          Int
+  participationIndex Float
+  status             EngagementStatus
+  @@unique([sessionId, patientId])
+}
+
+model Baseline {
+  id                 String     @id @default(cuid())
+  enrollmentId       String     @unique
+  enrollment         Enrollment @relation(fields: [enrollmentId], references: [id])
+  talkS              Float?
+  turns              Float?
+  cameraOnPct        Float?
+  presencePct        Float?
+  chatCount          Float?
+  participationIndex Float?
+  sessionsSeen       Int        @default(0)
+}
+
+// ---------- Notes ----------
+
+enum NoteStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+}
+
+enum SectionKey {
+  PRESENTATION_SUBJECTIVE
+  PARTICIPATION
+  INTERVENTIONS_RESPONSE
+  PLAN
+  SESSION_OVERVIEW
+  GROUP_PROCESS_THEMES
+  FACILITATOR_OBSERVATIONS
+}
+
+enum ClaimVerdict {
+  SUPPORTED
+  UNSUPPORTED
+  UNCERTAIN
+  CLINICIAN_ATTESTED
+}
+
+model IndividualNote {
+  id          String        @id @default(cuid())
+  sessionId   String
+  session     Session       @relation(fields: [sessionId], references: [id])
+  patientId   String
+  status      NoteStatus    @default(DRAFT)
+  templateVer String
+  goalSignals Json
+  // { status: CONSISTENT | DIVERGENT, note } — whether the subjective narrative agrees with the
+  // measured participation. Surfaced as a banner in review so a skim can't miss a contradiction.
+  signalAlignment Json?
+  approvedBy  String?
+  approvedAt  DateTime?
+  sections    NoteSection[]
+  @@unique([sessionId, patientId])
+}
+
+model GroupNote {
+  id             String        @id @default(cuid())
+  sessionId      String        @unique
+  session        Session       @relation(fields: [sessionId], references: [id])
+  status         NoteStatus    @default(DRAFT)
+  templateVer    String
+  goalIndicators Json
+  approvedBy     String?
+  approvedAt     DateTime?
+  sections       NoteSection[]
+}
+
+model NoteSection {
+  id               String          @id @default(cuid())
+  individualNoteId String?
+  individualNote   IndividualNote? @relation(fields: [individualNoteId], references: [id])
+  groupNoteId      String?
+  groupNote        GroupNote?      @relation(fields: [groupNoteId], references: [id])
+  key              SectionKey
+  bodyDraft        String          @db.Text
+  bodyEdited       String?         @db.Text
+  claims           NoteClaim[]
+}
+
+model NoteClaim {
+  id           String       @id @default(cuid())
+  sectionId    String
+  section      NoteSection  @relation(fields: [sectionId], references: [id])
+  text         String       @db.Text
+  evidence     Json
+  verdict      ClaimVerdict @default(UNSUPPORTED)
+  verifierNote String?      @db.Text
+}
+
+// ---------- Risk (batch; taxonomy = clinical/legal dependency) ----------
+
+enum RiskCategory {
+  SELF_HARM_SI
+  HARM_TO_OTHERS
+  MANDATED_REPORTER
+  ACUTE_CLINICAL
+}
+
+enum RiskSeverity {
+  ACUTE
+  ELEVATED
+  ROUTINE
+}
+
+enum RiskDisposition {
+  NONE
+  REVIEWED
+  ADDRESSED
+  FOLLOW_UP
+  ESCALATED
+}
+
+enum RiskStatus {
+  DETECTED
+  TRIAGED
+  DISPOSITIONED
+  ACKNOWLEDGED
+  ESCALATED
+  CLOSED
+}
+
+model RiskFlag {
+  id          String          @id @default(cuid())
+  sessionId   String
+  session     Session         @relation(fields: [sessionId], references: [id])
+  patientId   String
+  category    RiskCategory
+  severity    RiskSeverity
+  evidence    Json
+  status      RiskStatus      @default(DETECTED)
+  disposition RiskDisposition @default(NONE)
+  ackBy       String?
+  ackAt       DateTime?
+  slaDueAt    DateTime?
+}
+
+// ---------- Consent (P2) & audit ----------
+
+enum ConsentScope {
+  TREATMENT
+  RECORDING
+  ML_TRAINING
+}
+
+enum ConsentState {
+  PENDING
+  GRANTED
+  DECLINED
+  REVOKED
+}
+
+model ConsentRecord {
+  id         String       @id @default(cuid())
+  patientId  String
+  guardianId String
+  guardian   Guardian     @relation(fields: [guardianId], references: [id])
+  scope      ConsentScope
+  state      ConsentState @default(PENDING)
+  usState    String
+  grantedAt  DateTime?
+  revokedAt  DateTime?
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  orgId      String
+  actorId    String
+  action     String
+  entityType String
+  entityId   String
+  at         DateTime @default(now())
+  meta       Json?
+}
+
+// ---------- Operator settings ----------
+
+// Key/value for choices an operator makes in the admin console that must outlive a request and
+// apply to everyone (unlike the DevBar's per-browser sim_* cookies). Deliberately NOT in
+// resetAll()'s table list — reseeding demo data shouldn't silently revert a system setting.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}

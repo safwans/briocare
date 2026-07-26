@@ -1,0 +1,19 @@
+# Local dev MySQL for BrioCare (TEST DATA ONLY — not for PHI).
+# Mirrors Cloud SQL for MySQL. Port 3307 on the host to avoid clashing with a 3306 already in use.
+services:
+  db:
+    image: mysql:8
+    container_name: briocare-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: briocare
+      MYSQL_DATABASE: briocare
+      MYSQL_USER: briocare
+      MYSQL_PASSWORD: briocare
+    ports:
+      - "3307:3306"
+    volumes:
+      - briocare-mysqldata:/var/lib/mysql
+
+volumes:
+  briocare-mysqldata:

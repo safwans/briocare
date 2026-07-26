@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/* BrioCare uses a single controlled light palette (matches the mocks) — no auto dark flip. */
+:root {
+  --bg: #eef4f4;
+  --ink: #14303a;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
