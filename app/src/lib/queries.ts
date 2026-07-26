@@ -431,6 +431,10 @@ export type KidDetail = {
   missedLabels: string[];
   presentLatest: boolean;
   latestLabel: string | null;
+  /** Session the metrics panel is reporting — the last one attended, not necessarily the last one. */
+  metricsLabel: string | null;
+  /** True only when even that session was missed, i.e. the member has never attended. */
+  metricsAbsent: boolean;
   baseline: number | null;
   metrics: KidMetric[];
   history: { session: string; text: string }[];
@@ -460,13 +464,30 @@ export async function getKidDetail(cohortId: string, patientId: string): Promise
   const now = new Date();
   const age = now.getFullYear() - enrollment.patient.dob.getFullYear() - (now < new Date(now.getFullYear(), enrollment.patient.dob.getMonth(), enrollment.patient.dob.getDate()) ? 1 : 0);
 
+  // Report the last session the member was actually IN, not simply the last one on the calendar.
+  // A missed session is stored as a zero-participation metric — correct for "what happened in
+  // session 3", useless for "how is this member doing" — so headlining it read as a total collapse
+  // (index 0, -100% vs baseline) for someone who was merely away. See the note on
+  // `CaseloadRow.attended`; the caseload already drops missed sessions via `attendedTrend`, and
+  // this is the same rule applied to the per-member panel.
+  //
+  // Comparisons walk the attended sessions too: measuring against `mets[-2]` would compare a real
+  // session to an absence's zeros and reintroduce the same distortion one step back.
+  const attendedMets = mets.filter((m) => presentByIndex.get(m.session.index) ?? true);
+  const shown = attendedMets[attendedMets.length - 1] ?? latest;
+  const shownPrior = attendedMets[attendedMets.length - 2] ?? (shown === latest ? prior : undefined);
+  // True only when there is nothing better to show — a member who has never attended. The page
+  // blanks the behavioural metrics in that case rather than printing zeros as if they were measured.
+  const metricsAbsent = !shown || !(presentByIndex.get(shown.session.index) ?? true);
+  const metricsLabel = shown ? `S${shown.session.index}` : null;
+
   const pct = (cur: number, ref: number | null | undefined) => (ref && ref !== 0 ? `${cur - ref > 0 ? "+" : ""}${Math.round(((cur - ref) / ref) * 100)}%` : null);
-  const metrics: KidMetric[] = latest ? [
-    { label: "Participation index", value: String(latest.participationIndex), delta: pct(latest.participationIndex, baseline), deltaNeg: baseline ? latest.participationIndex < baseline : false },
-    { label: "Talk time", value: `${(latest.talkS / 60).toFixed(1)} min`, delta: prior ? pct(latest.talkS, prior.talkS) : null, deltaNeg: prior ? latest.talkS < prior.talkS : false },
-    { label: "Speaking turns", value: String(latest.turns), delta: prior ? pct(latest.turns, prior.turns) : null, deltaNeg: prior ? latest.turns < prior.turns : false },
-    { label: "Camera on", value: `${latest.cameraOnPct}%`, delta: null, deltaNeg: false },
-    { label: "Presence", value: `${latest.presencePct}%`, delta: null, deltaNeg: false },
+  const metrics: KidMetric[] = shown ? [
+    { label: "Participation index", value: String(shown.participationIndex), delta: pct(shown.participationIndex, baseline), deltaNeg: baseline ? shown.participationIndex < baseline : false },
+    { label: "Talk time", value: `${(shown.talkS / 60).toFixed(1)} min`, delta: shownPrior ? pct(shown.talkS, shownPrior.talkS) : null, deltaNeg: shownPrior ? shown.talkS < shownPrior.talkS : false },
+    { label: "Speaking turns", value: String(shown.turns), delta: shownPrior ? pct(shown.turns, shownPrior.turns) : null, deltaNeg: shownPrior ? shown.turns < shownPrior.turns : false },
+    { label: "Camera on", value: `${shown.cameraOnPct}%`, delta: null, deltaNeg: false },
+    { label: "Presence", value: `${shown.presencePct}%`, delta: null, deltaNeg: false },
   ] : [];
 
   const notes = await prisma.individualNote.findMany({
@@ -483,6 +504,7 @@ export async function getKidDetail(cohortId: string, patientId: string): Promise
     status: (latest?.status ?? "ESTABLISHING") as EngagementStatus,
     trend: mets.map((m) => m.participationIndex), labels: mets.map((m) => `S${m.session.index}`),
     attendance, attendedCount, totalSessions: mets.length, missedLabels, presentLatest, latestLabel,
+    metricsLabel, metricsAbsent,
     baseline, metrics, history,
   };
 }

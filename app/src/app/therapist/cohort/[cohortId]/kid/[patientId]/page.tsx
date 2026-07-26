@@ -18,7 +18,6 @@ export default async function KidDetailPage({ params }: { params: Promise<{ coho
   const baseY = kid.baseline != null ? y(kid.baseline) : null;
   // HTML-overlay dot positions (SVG uses preserveAspectRatio=none, so SVG circles would distort)
   const dots = kid.trend.map((v, i) => ({ leftPct: (px(i) / W) * 100, topPx: y(v), present: kid.attendance[i] ?? true }));
-  const rawMetricLabels = new Set(["Talk time", "Speaking turns", "Camera on", "Presence"]);
 
   return (
     <div className="px-10 py-8 max-w-5xl">
@@ -92,13 +91,28 @@ export default async function KidDetailPage({ params }: { params: Promise<{ coho
               {kid.missedLabels.length ? `Missed ${kid.missedLabels.join(", ")}` : "Present every session"}
             </div>
           </div>
+          {/* Say which session the numbers below describe. Without this the panel silently reports
+              an older session whenever the most recent one was missed, and the figures look stale
+              rather than deliberately chosen. */}
+          {kid.metricsLabel && (
+            <div className="flex items-baseline justify-between">
+              <div className="text-sm font-semibold text-slate-800">
+                {kid.metricsLabel === kid.latestLabel ? "Latest session" : "Last attended session"}
+              </div>
+              <div className="text-xs font-semibold text-slate-400">{kid.metricsLabel}</div>
+            </div>
+          )}
           {!kid.presentLatest && kid.latestLabel && (
             <div className="rounded-lg px-3 py-2 text-xs font-medium" style={{ background: "#fbeef1", color: "#8f3a4c" }}>
-              Absent from {kid.latestLabel} — this session&apos;s talk, turns, camera and presence reflect the missed session, not disengagement.
+              {kid.metricsAbsent
+                ? `Absent from ${kid.latestLabel} — and from every session so far, so there is nothing measured to show.`
+                : `Absent from ${kid.latestLabel}. Figures below are from ${kid.metricsLabel}, the last session attended — a missed session is stored as zeros and would read as disengagement rather than absence.`}
             </div>
           )}
           {kid.metrics.map((m, i) => {
-            const absentRaw = !kid.presentLatest && rawMetricLabels.has(m.label);
+            // When metricsAbsent is set the member has never attended, so nothing below was
+            // measured — blank every figure rather than printing zeros that read as a score.
+            const absentRaw = kid.metricsAbsent;
             return (
               <div key={i} className="flex items-center justify-between pb-3 border-b border-slate-100 last:border-0">
                 <div>
