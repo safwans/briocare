@@ -71,22 +71,23 @@ export default function TherapistNav({ cohorts, homeBadge = 0 }: { cohorts: NavC
           {onHome ? "Cohort" : "Active cohort"}
         </div>
         <div className="relative">
-          {/* On home the trigger is the call to action — nothing else in the sidebar is reachable
-              until a cohort is picked, so it gets the accent treatment rather than an inset one. */}
+          {/* With no cohort chosen the trigger reads as an empty slot — dashed outline, muted
+              accent bar — rather than a filled control, so it doesn't look like a selection has
+              already been made. Picking one swaps it to the solid card with that cohort's accent. */}
           <button
             onClick={() => setOpen((o) => !o)}
-            className={`w-full flex items-center gap-[11px] rounded-xl px-3 py-3 text-left border ${
-              onHome ? "bg-[#1c7b8c] border-[#2fa4b8] ring-[3px] ring-[#2fa4b8]/20" : "bg-[#163944] border-[#1e4a56]"
+            className={`w-full flex items-center gap-[11px] rounded-xl px-3 py-3 text-left ${
+              onHome ? "bg-[#0f2a33] border border-dashed border-[#2c5561]" : "bg-[#163944] border border-[#1e4a56]"
             }`}
           >
             <span className="w-[9px] h-[30px] rounded shrink-0" style={{ background: onHome ? "#3a5a64" : ACCENTS[activeIdx % ACCENTS.length] }} />
             <span className="flex-1 min-w-0 leading-tight">
               <span className="block text-[13.5px] font-bold text-white truncate">{onHome ? "Select cohort" : titleOf(active)}</span>
-              <span className={`block text-[11.5px] ${onHome ? "text-[#bfe4ea]" : "text-[#7f9aa1]"}`}>
+              <span className="block text-[11.5px] text-[#7f9aa1]">
                 {onHome ? `${cohorts.length} ${cohorts.length === 1 ? "group" : "groups"}` : subOf(active)}
               </span>
             </span>
-            <span className={`text-sm transition-transform ${open ? "rotate-180" : ""} ${onHome ? "text-white" : "text-[#7f9aa1]"}`}>▾</span>
+            <span className={`text-sm transition-transform text-[#7f9aa1] ${open ? "rotate-180" : ""}`}>▾</span>
           </button>
           {open && (
             <div className="absolute z-30 top-[calc(100%+6px)] left-0 right-0 rounded-xl bg-[#0f2a33] border border-[#1e4a56] p-[5px] shadow-[0_18px_40px_-12px_rgba(0,0,0,0.55)]">
