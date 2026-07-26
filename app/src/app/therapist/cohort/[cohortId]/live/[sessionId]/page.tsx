@@ -5,6 +5,7 @@ import { ensureRoom, mintToken } from "@/lib/daily";
 import { setSessionStatus, processSessionAction } from "@/lib/actions";
 import LiveRoom from "@/components/LiveRoomLazy";
 import LiveRoomWithSimLazy from "@/components/LiveRoomWithSimLazy";
+import { EndLiveSession } from "@/components/LiveSession";
 import { asrMode } from "@/lib/asr";
 import { simEnabled } from "@/lib/sim";
 import { focusLabel } from "@/components/parts";
@@ -211,6 +212,10 @@ export default async function ClinicianLivePage({
 
   return (
     <div className="min-h-[calc(100vh-44px)] flex flex-col items-center justify-center text-center px-10 py-16" style={{ background: "#0e2029", color: "#cfe0e2" }}>
+      {/* The session is over, so the call must be too. Ending is a Server Action that revalidates
+          in place rather than redirecting, and the call now outlives this page — without this the
+          clinician kept publishing camera and mic into a finished session. */}
+      <EndLiveSession sessionId={sessionId} />
       <div className="max-w-[460px] flex flex-col items-center">
         <div className="w-[88px] h-[88px] rounded-3xl grid place-items-center mb-7" style={{ background: "#12303a", border: "1px solid #1e4a56" }}>
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#4f7d88" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useLiveCall, type CallConfig, type LiveCall } from "./use-live-call";
 import { Video } from "./media";
@@ -15,6 +15,8 @@ type SessionApi = {
   call: LiveCall;
   /** Idempotent — re-calling with the same sessionId does not restart the call. */
   join: (cfg: CallConfig) => void;
+  /** Tear the call down: flush buffered capture, then release the camera and mic. */
+  end: () => void;
   activeSessionId: string | null;
 };
 
@@ -35,11 +37,17 @@ export function LiveSessionProvider({ children }: { children: React.ReactNode })
     setCfg((prev) => (prev?.sessionId === next.sessionId ? prev : next));
   }, []);
 
+  // Dropping the config flips the call hook's effect key from the session id to undefined, so
+  // React runs the teardown that already exists there — flush the buffered events and transcript
+  // segments, then destroy the call and release the camera and mic. Reusing that path rather than
+  // writing a second one is the point: it is the only teardown that also flushes capture.
+  const end = useCallback(() => setCfg(null), []);
+
   // `left` means the clinician pressed Leave — drop the config so the mini-view disappears and a
   // later visit to the live page can start a fresh call rather than resurrecting the dead one.
   const activeSessionId = call.left ? null : cfg?.sessionId ?? null;
 
-  const api = useMemo<SessionApi>(() => ({ call, join, activeSessionId }), [call, join, activeSessionId]);
+  const api = useMemo<SessionApi>(() => ({ call, join, end, activeSessionId }), [call, join, end, activeSessionId]);
 
   return (
     <Ctx.Provider value={api}>
@@ -47,6 +55,24 @@ export function LiveSessionProvider({ children }: { children: React.ReactNode })
       <FloatingSelfView />
     </Ctx.Provider>
   );
+}
+
+/**
+ * Rendered by the live page whenever the session is NOT live. Ending a session is a Server Action
+ * that revalidates in place rather than redirecting, so the page simply re-renders into its
+ * "ended" branch and stops rendering the room — which, now that the call lives above the route,
+ * left the clinician publishing camera and mic to a session that was over.
+ */
+export function EndLiveSession({ sessionId }: { sessionId: string }) {
+  const api = useContext(Ctx);
+  const active = api?.activeSessionId ?? null;
+  const end = api?.end;
+  useEffect(() => {
+    // Only end OUR session. Without this guard, opening an ended session for one cohort would
+    // tear down a call that is still running for another.
+    if (active && active === sessionId) end?.();
+  }, [active, sessionId, end]);
+  return null;
 }
 
 function fmtClock(sec: number): string {
@@ -133,7 +159,7 @@ function FloatingSelfView() {
           </a>
         )}
         <button
-          onClick={call.leave}
+          onClick={() => { call.leave(); api.end(); }}
           className="rounded-lg px-2.5 py-1.5 text-[11.5px] font-bold text-white"
           style={{ background: "#c1445b" }}
         >
