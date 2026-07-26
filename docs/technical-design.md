@@ -62,10 +62,6 @@ The rule is capture only: no prompts to the clinician, none to the teens, no rea
 
 **4 — Verify every claim independently.** A second pass judges each claim against only its own cited evidence, so the verifier cannot be talked into agreeing by the surrounding prose. Claims land `SUPPORTED`, `UNSUPPORTED` or `UNCERTAIN` and the clinician sees which is which.
 
-**5 — Risk scan, group note, then `READY`,** plus a `session.processed` audit event. The group note is aggregate prose — claim-level grounding rigor lives in the individual notes.
-
-Notes are never merged on a re-run. Writes are destructive-then-recreate inside a transaction, and the pipeline refuses to write a note with zero sections rather than replacing real content with an empty record.
-
 ## 6. Core data model
 
 ![](assets/20260726_080448_image.png)
