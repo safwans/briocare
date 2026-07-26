@@ -12,7 +12,6 @@ Vendor code is confined to a small set of modules: `daily.ts` (rooms and tokens)
 
 A therapy session splits into two phases with a hard line between them. **During the session the system captures and displays but never infers** — no model runs while the room is open. **After the session** a batch pipeline resolves transcripts, computes engagement, and drafts notes. Nothing in the product needs a model response during the hour, and keeping inference out of the room removes an entire class of failure from a clinical setting with minors in it.
 
-
 ## 2. Technical stack
 
 
@@ -55,13 +54,13 @@ The rule is capture only: no prompts to the clinician, none to the teens, no rea
 
 ## 5. Batch flow (after the session)
 
-**1 — Engagement.** Raw events become an `EngagementMetric` per teen: a weighted, soft-capped **participation index** over talk, turns, camera, presence and chat. Each input is capped so one loud member cannot saturate the score, and status comes from the delta against that teen's own `Baseline` — never against the cohort. Weights and caps are in `docs/engagement-spec.md`.
+**1 — Engagement.** Raw events become an `EngagementMetric` per teen: a weighted, soft-capped **participation index** over talk, turns, camera, presence and chat. Each input is capped so one loud member cannot saturate the score, and status comes from the delta against that teen's own `Baseline` — never against the cohort.
 
 **2 — Resolve a transcript, per teen.** Live capture when the session was transcribed; synthetic fixtures otherwise.
 
 **3 — Draft a grounded note,** four teens at a time. Claude writes four sections plus goal signals from that teen's transcript, their goals, the session module, and a one-line participation summary from step 1. It also returns `signalAlignment`, a verdict on whether the narrative and the measured signal agree — without it a note can read “engaged and forthcoming” while the caseload shows the same teen well below baseline, and a clinician skimming the prose never sees the contradiction.
 
-**4 — Verify every claim independently.** A second pass judges each claim against only its own cited evidence, so the verifier cannot be talked into agreeing by the surrounding prose. Claims land `SUPPORTED`, `UNSUPPORTED` or `UNCERTAIN` and the clinician sees which is which. Evidence rules and verdict semantics are in `docs/grounding-contract.md`.
+**4 — Verify every claim independently.** A second pass judges each claim against only its own cited evidence, so the verifier cannot be talked into agreeing by the surrounding prose. Claims land `SUPPORTED`, `UNSUPPORTED` or `UNCERTAIN` and the clinician sees which is which.
 
 **5 — Risk scan, group note, then `READY`,** plus a `session.processed` audit event. The risk workflow is real; the detector is a stub (§7). The group note is aggregate prose — claim-level grounding rigor lives in the individual notes.
 
