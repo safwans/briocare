@@ -1,67 +1,71 @@
-# BrioCare — Architecture Overview
+# BrioCare — Technical Design
 
-A short, accurate description of what the Phase-1 system actually does. Every claim here was checked
-against the code; where the implementation differs from an older doc, this file follows the code and
-says so. For the product argument see `product-requirements.md`; for the exhaustive version see
-`technical-design.md`.
+## 1. System architecture
 
-**One thing to be clear about up front: no audio is ever recorded or stored.** Speech is transcribed
-in flight and only text and behavioral telemetry are persisted. Section 6 explains exactly how.
+![](assets/20260726_073924_image.png)
 
----
+BrioCare is a single Next.js 16 application deployed as one Cloud Run service against MySQL 8 on
+Cloud SQL. There is no separate backend and no internal API. Server Components read through the
+query modules in `src/lib/` (`queries.ts`, `patient.ts`, `admin.ts`); Server Actions in `actions.ts`
+and `admin-actions.ts` perform every mutation. Five API routes exist, each because the browser needs
+something a Server Action can't give it: two ingest routes receive transcript segments and
+participation telemetry flushed with `sendBeacon`, and three dev-only simulator routes proxy calls
+that must keep API keys server-side (`sim/turn` to Anthropic, `sim/tts` to Deepgram) or drive the
+bot fleet (`sim/[sessionId]/bots`).
 
-## 1. Stack
+Vendor code is confined to a small set of modules. On the server, `daily.ts` handles room and token
+lifecycle, `ai.ts` holds the model IDs, `db.ts` builds the Prisma client, and `asr.ts` is the
+transcription port — it selects the provider and gates the batch path. Nothing else on the server
+imports a vendor SDK.
 
-| Layer | Choice |
-|---|---|
-| App | Next.js 16 (App Router) + React 19, TypeScript |
-| Data | Prisma 7 → **MySQL 8** (`prisma/schema.prisma` sets `provider = "mysql"`; local Docker on port 3307) |
-| Video | Daily (CPaaS), embedded as Daily Prebuilt |
-| Speech→text | Deepgram, reached **through Daily's live transcription** (see §6) |
-| Note generation | Claude — `NOTE_MODEL` and `VERIFY_MODEL` are both `claude-opus-4-8` (`src/lib/ai.ts`) |
+That buys one clean substitution and one partial. Moving inference to `AnthropicVertex` is a change
+to `ai.ts` alone — the `messages` surface is identical, so no call site moves. Moving video to
+LiveKit is not. `daily.ts` covers only the server side; the live room runs on `daily-js` in the
+browser as a **call object** with our own UI — tiles, transcription events, participant state — and
+none of that sits behind a port. That migration is one file on the server and a rewrite in the
+client. The dev-only patient simulator is the remaining exception: its speech route calls Deepgram
+directly rather than through the port, because it ships with the demo rather than the product.
 
-There is no REST API layer. Server Components read the database directly through the query modules
-in `src/lib/`; all mutations are Server Actions. The only HTTP endpoints are two capture-ingest
-routes and three dev-only simulator routes.
+Transcription runs one way today. Daily transcribes the room live, every connected client attributes
+segments by participant and posts them to the ingest route, and `MediaTrack.gcsUri` holds a
+`daily-live://` marker. Redundant capture is deliberate: the ingest route de-duplicates on timestamp
+and text, so one participant closing their tab no longer costs the transcript. The recorded-audio
+alternative behind `asr.ts` is implemented and verified against real audio, but the branch is
+unreachable because it requires a real recording URL and no code writes one — wiring recording to
+storage is what would activate it.
 
-> `build-plan.md` still says Postgres. The schema says MySQL. MySQL is correct.
+While the group is running, the system captures and displays but never infers. No model runs while
+the room is open. Nothing in the product needs a response during the hour, so keeping inference out
+of the room removes an entire class of failure from the clinical setting.
 
----
+After the session, a batch pipeline resolves the transcript and recomputes engagement from the raw
+events independently, then hands both to note generation together — the first point at which the two
+streams meet. The transcript supplies what the teen said; the participation summary supplies the
+measured signal, including direction against that teen's own baseline. Mechanism is in §5.
 
-## 2. High-level shape
+Three things are deliberately provisional. `proxy.ts` is a shared-secret gate over the whole
+deployment, not authentication — there is no per-user identity, no roles, and no ownership checks on
+any action. `processSession()` runs inside the request that triggers it, with no queue, retries, or
+backpressure. And the pipeline is started by hand rather than by the session ending. All three are
+Phase 2.
 
-```
-   Browser                          Next.js server                    External
-   ───────                          ──────────────                    ────────
-                     ┌── proxy.ts (shared-secret cookie gate) ──┐
-                     │                                          │
- /therapist  ────────┤  Server Components ── src/lib/queries.ts ─┼──► MySQL
- /patient    ────────┤  Server Actions   ── src/lib/actions.ts  ─┤
- /admin      ────────┘                                          │
-                                                                │
- LiveRoom.tsx ──► POST /api/session/[id]/events ────────────────►│  (EngagementEvent)
- (daily-js)   ──► POST /api/session/[id]/transcript ────────────►│  (Transcript text)
-      │                                                          │
-      └──────────── WebRTC media ──────────────────────────────────► Daily ──► Deepgram
-                                                                              (streaming)
+## 2. Technical stack
 
-                     processSession()  ── src/lib/pipeline.ts ───┼──► Claude (notes + verify)
-                     (manually triggered)                        └──► MySQL
-```
 
-**Three surfaces**, each with its own route group and nav: `/therapist` (dashboard → cohort caseload
-→ live room / note review / per-teen detail), `/patient` (home, check-in, group, practice, join),
-`/admin` (read-only rosters). `/` is the marketing landing page.
+| Layer           | Choice                                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| App             | Next.js 16 (App Router) + React 19, TypeScript                                                       |
+| Data            | Prisma 7 →**MySQL 8** (`prisma/schema.prisma` sets `provider = "mysql"`; local Docker on port 3307) |
+| Video           | Daily (CPaaS), driven as a**call object** (`createCallObject`) with our own UI, not Daily Prebuilt   |
+| Speech → text  | Deepgram, reached**through Daily's live transcription**                                              |
+| Note generation | Claude —`NOTE_MODEL` and `VERIFY_MODEL` are both `claude-opus-4-8` (`src/lib/ai.ts`)                |
 
-**Access control is a single shared password**, not authentication. `src/proxy.ts` checks one
-`bc_gate` cookie derived from one site-wide credential and redirects to `/login` if absent (API
-routes get a 401 instead, so a POST can't "succeed" by following a redirect). Behind the gate there
-is no per-user identity: actions resolve the acting clinician with `prisma.clinician.findFirst()`
-and patient pages resolve a demo patient. Real auth, roles, and ownership checks are Phase 2.
-
----
+`ai.ts` also holds `DIRECTOR_MODEL` (`claude-sonnet-5`), which drives the dev-only AI-patient
+simulator. It is not part of the product path.
 
 ## 3. Session lifecycle
+
+![](assets/20260726_072654_image.png)
 
 `Session.status` is the spine of the whole system:
 
@@ -74,19 +78,128 @@ SCHEDULED ──► LIVE ──► ENDED ──► PROCESSING ──► READY
 - `SCHEDULED → LIVE` and `LIVE → ENDED` are driven by the therapist's **Start**/**End session**
   buttons (`setSessionStatus` in `actions.ts`). Ending a session also schedules the cohort's next
   one, unless the programme's fixed session count is already reached.
-- `ENDED → PROCESSING → READY` is the batch pipeline (§7).
+- `ENDED → PROCESSING → READY` is the batch pipeline (§5).
 - The Daily room is provisioned **lazily** — only when status is `LIVE`. A scheduled session has no
   room, so a teen can't land alone in a room nobody started.
 
-**The pipeline does not run automatically when a session ends.** It is triggered by a clinician
-pressing **Generate notes**, either on the ended live page or in note review
-(`processSessionAction`). There is no queue, no cron, no webhook — this is a deliberate Phase-1
-simplification, not an oversight, but it does mean an ended session sits with no notes until someone
-asks for them.
+**The pipeline does not run when a session ends.** `setSessionStatus` updates the status, writes an
+audit event, and schedules the next session — nothing more. Processing is triggered by a clinician
+pressing **Generate notes** (`processSessionAction`), either on the ended live page or in note
+review. There is no queue, no cron, no webhook. This is a deliberate Phase-1 simplification, but it
+does mean an ended session sits with no notes until someone asks for them.
 
----
+## 4. Live flow (during the session)
 
-## 4. Core data model
+The rule during a live session is **capture only — the AI produces no output**. No prompts to the
+clinician, none to the teens, no real-time risk detection. The clinician runs the room.
+
+1. **Therapist starts the session.** Status → `LIVE`. The live page calls `ensureRoom(sessionId)`
+   (idempotent create of a private Daily room, video and audio starting off) and `mintToken(...)` for
+   a short-lived meeting token — owner for the clinician, member for each teen. The facilitator's
+   token overrides the room default so they arrive unmuted; teens stay muted until they choose.
+2. **Everyone joins on their own device.** This is the load-bearing design decision: one clean
+   near-field stream per person, so **speaker identity is a property of the connection**, not
+   something a model has to infer from a shared room.
+3. **Behavioral events are captured.** `LiveRoom.tsx` listens to Daily participant events, buffers
+   them, and POSTs to `/api/session/[id]/events`, which writes `EngagementEvent` rows. The route
+   accepts only seven event types — `JOIN`, `LEAVE`, `CAMERA_ON`, `CAMERA_OFF`, `SPEAKING_START`,
+   `SPEAKING_END`, `CHAT` — and its own comment notes "no transcript/PHI text."
+4. **Speech is transcribed live.** Daily's transcription (Deepgram streaming under the hood) emits
+   `transcription-message` events into the browser. The client buffers
+   `{patientId, text, startMs, endMs}` and POSTs to `/api/session/[id]/transcript`, which appends to
+   that teen's `Transcript.segments` and stamps the track `daily-live://<sessionId>`.
+   - **Every connected client captures the same room-wide stream**, not just the facilitator's, and
+     the server dedupes on `(startMs, text)`. This is why one clinician refresh no longer kills the
+     transcript for the whole room.
+   - **Domain prerequisite — this is not a per-room setting.** Transcription is a first-party Daily
+     feature, but it ships **off** until enabled on the *domain*, and `startTranscription()` is
+     rejected until it is. Two paths enable it:
+
+     1. **Daily-bundled Deepgram** — paid plans only, billed per unmuted participant minute.
+     2. **Bring your own Deepgram key** — attached to the domain, so ASR bills through your own
+        Deepgram account. **This is what BrioCare uses**, because `DEEPGRAM_API_KEY` is already
+        provisioned for TTS (`/api/sim/tts`) and this keeps ASR on that same bill.
+
+     The domain had *neither* configured, which is why every `startTranscription()` call failed.
+     Enabling path 2 is one REST call per Daily account:
+
+     ```bash
+     curl -X POST https://api.daily.co/v1/ \
+       -H "Authorization: Bearer $DAILY_API_KEY" \
+       -d '{"properties":{"enable_transcription":"deepgram:'"$DEEPGRAM_API_KEY"'"}}'
+     ```
+
+     Verify with `GET https://api.daily.co/v1/` → `config.enable_transcription` must be a
+     `deepgram:…` string, not `null`. Leave `enable_transcription_storage` false: Daily should not
+     retain transcripts, we persist the words ourselves (see "Audio is never written to disk").
+
+     Without it the whole capture path is dead but *looks* healthy — mics publish, tiles go green,
+     and only the empty transcript hints at it. `LiveRoom.tsx` now listens for
+     `transcription-started` / `-error` (plus a 12s watchdog for the case where neither fires) and
+     renders a `live` / `not running` chip, because `startTranscription()` returns `void` and
+     reports failure asynchronously, so a bare `try/catch` around it catches nothing.
+5. **What the clinician sees:** live speaking-time bars per member — accrued in the browser from
+   Daily's active-speaker signal on a one-second tick — a running transcript, and an "AI silent"
+   chip. Nothing is generated or suggested.
+
+**Audio is never written to disk.** It travels from the teen's device → Daily → Deepgram's streaming
+API and comes back as words. We persist the words. There is no `enable_recording` on the room
+(`src/lib/daily.ts`), no start/stop-recording call, no recording webhook, and no storage client in
+the project.
+
+## 5. Batch flow (after the session)
+
+`processSession(sessionId)` in `src/lib/pipeline.ts`. Sets status `PROCESSING`, and on any throw sets
+`FAILED` rather than leaving a half-written session looking finished.
+
+**Step 1 — Engagement.** `recomputeEngagement(sessionId)` turns raw `EngagementEvent` rows into an
+`EngagementMetric` per teen: talk seconds, turns, camera %, presence %, chat count, combined into a
+weighted, soft-capped **participation index** (talk 0.35, turns 0.25, camera 0.15, presence 0.15,
+chat 0.10; each input capped so one loud member can't saturate the score). Status comes from the
+delta against that teen's own `Baseline` — never against the cohort.
+
+**Step 2 — Resolve a transcript, per teen.** Strict priority:
+
+1. **Daily live capture** — the track is `daily-live://…` and has segments. *This is the only branch
+   that fires on a real session.*
+2. **Deepgram pre-recorded** — requires a real audio URL. **Unreachable today**, because nothing
+   writes one (§1).
+3. **Synthetic fixtures** (`src/lib/fixtures.ts`) — `profileForStatus()` picks one of six canned
+   transcripts (`withdrawn`, `withdrawn_flagged`, `engaged`, `improving`, `brief`, `absent`) from the
+   teen's engagement status and attendance. *This is what runs on seeded demo data.*
+
+**Step 3 — Generate a grounded individual note** (`groundedIndividualNote` in `notegen.ts`), per teen,
+four at a time:
+
+- **Generate** — Claude drafts four sections plus goal signals, from that teen's transcript, their
+  goals, the session module, and a one-line participation summary built from Step 1. It also returns
+  `signalAlignment`, a structured verdict on whether the narrative and the measured signal tell the
+  same story. Without it a note can read "engaged and forthcoming" while the caseload shows the same
+  teen well below baseline, and a clinician skimming the prose never sees the contradiction.
+- **Verify** — every claim is checked independently:
+  - no evidence cited → `UNSUPPORTED`
+  - metric evidence only → `SUPPORTED` automatically (it's our own measured data)
+  - transcript evidence → a **second model call** judges whether the quotes substantiate the claim,
+    returning `SUPPORTED` / `UNSUPPORTED` / `UNCERTAIN`. Claims citing both are shown both, so a
+    sentence reconciling narrative with signal isn't penalised.
+
+**Step 4 — Risk scan.** `scanForRisk()` runs over the transcript and writes `RiskFlag` rows with a
+12-hour SLA. **This is a regex stub, not a clinical detector** — every flag's evidence is stamped
+`[SYNTHETIC STUB — not a clinical detection]`. The workflow around it is real; the detector waits on
+a signed-off clinical taxonomy.
+
+**Step 5 — Group note.** One session-level note generated from all members' summaries. It is
+aggregate prose; claim-level grounding rigor lives in the individual notes.
+
+**Step 6 — Finish.** Status → `READY`, plus a `session.processed` audit event.
+
+Notes are never merged on a re-run. Note writes are destructive-then-recreate inside a transaction,
+and the pipeline refuses to write a note with zero sections rather than replacing real content with
+an empty record — so a second pass can't leave a half-updated record in a chart.
+
+## 6. Core data model
+
+![](assets/20260726_080448_image.png)
 
 Only the entities the two flows touch:
 
@@ -107,168 +220,3 @@ Only the entities the two flows touch:
 > `MediaTrack.gcsUri` is named for a Google Cloud Storage object. **No such object exists.** The
 > field only ever holds a marker string: `daily-live://<sessionId>` or `synthetic://<profile>`. The
 > name describes an intended future, not current behavior.
-
----
-
-## 5. Live flow (during the session)
-
-The rule during a live session is **capture only — the AI produces no output**. No prompts to the
-clinician, none to the teens, no real-time risk detection. The clinician runs the room.
-
-1. **Therapist starts the session.** Status → `LIVE`. The live page calls `ensureRoom(sessionId)`
-   (idempotent create of a private Daily room, video and audio starting off) and `mintToken(...)` for
-   a short-lived meeting token — owner for the clinician, member for each teen.
-2. **Everyone joins on their own device.** This is the load-bearing design decision: one clean
-   near-field stream per person, so **speaker identity is a property of the connection**, not
-   something a model has to infer from a shared room.
-3. **Behavioral events are captured.** `LiveRoom.tsx` listens to Daily participant events, buffers
-   them, and POSTs to `/api/session/[id]/events`, which writes `EngagementEvent` rows. The route
-   accepts only the seven event types above — its own comment notes "no transcript/PHI text."
-4. **Speech is transcribed live.** Daily's transcription (Deepgram streaming under the hood) emits
-   `transcription-message` events into the browser. The client buffers `{patientId, text, startMs,
-   endMs}` and POSTs to `/api/session/[id]/transcript`, which appends to that teen's
-   `Transcript.segments` and stamps the track `daily-live://<sessionId>`.
-   - **Every connected client captures the same room-wide stream**, not just the facilitator's, and
-     the server dedupes on `(startMs, text)`. This is why one clinician refresh no longer kills the
-     transcript for the whole room.
-5. **What the clinician sees:** live speaking-time bars per member, a running transcript, and an
-   "AI silent" chip. Nothing is generated or suggested.
-
-**Audio is never written to disk.** It travels teen's device → Daily → Deepgram's streaming API and
-comes back as words. We persist the words. There is no `enable_recording` on the room
-(`src/lib/daily.ts`), no start/stop-recording call, no recording webhook, and no storage client in
-the project.
-
----
-
-## 6. Where speech-to-text actually happens
-
-This is the part most easily misread, so it is worth stating exactly.
-
-**Deepgram is used once, in one way: as a streaming service behind Daily's live transcription.** It
-receives audio during the call and returns text. It never fetches, reads, or processes a recording,
-because no recording exists.
-
-There *is* a second, unused code path. `src/lib/asr.ts` implements `DeepgramProvider.transcribe()`,
-which calls Deepgram's **pre-recorded** endpoint by handing it a URL to fetch. It is double-gated and
-**never executes on a real session**:
-
-- `getAsrProvider()` returns `null` unless `ASR_PROVIDER=deepgram` (the default is `daily`), and
-- the pipeline only calls it when `isRealAudioUrl(gcsUri)` passes, which requires an `http(s)://`
-  URL — and nothing in the application ever writes one.
-
-So flipping the env var does not switch the system to batch transcription; it falls through to
-fixtures. The provider has only ever run against a public sample clip in `scripts/asr-test.ts`, which
-exists to de-risk the vendor ahead of the recording work. **Using that path in production would
-require recording and storing per-participant audio, which is not built and is a separate consent and
-retention decision.**
-
-**Known gap:** `lowConfSpans` is populated by filtering segments with `confidence < 0.6`, but the
-live capture path never sends a confidence value (`LiveRoom.tsx` pushes only patient, text, and
-timings). So on every session that can actually run today, `lowConfSpans` is empty and no passage is
-marked low-confidence — despite that being a stated product commitment.
-
----
-
-## 7. Batch flow (after the session)
-
-`processSession(sessionId)` in `src/lib/pipeline.ts`. Sets status `PROCESSING`, and on any throw sets
-`FAILED` rather than leaving a half-written session looking finished.
-
-**Step 1 — Engagement.** `recomputeEngagement(sessionId)` turns raw `EngagementEvent` rows into an
-`EngagementMetric` per teen: talk seconds, turns, camera %, presence %, chat count, combined into a
-weighted, soft-capped **participation index** (talk 0.35, turns 0.25, camera 0.15, presence 0.15,
-chat 0.10; each input capped so one loud member can't saturate the score). Status comes from the
-delta against that teen's own `Baseline` — never against the cohort.
-
-**Step 2 — Resolve a transcript, per teen.** Strict priority:
-
-1. **Daily live capture** — the track is `daily-live://…` and has segments. *This is the only branch
-   that fires on a real session.*
-2. **Deepgram pre-recorded** — requires a real audio URL. **Unreachable today** (§6).
-3. **Synthetic fixtures** (`src/lib/fixtures.ts`) — `profileForStatus()` picks one of six canned
-   transcripts (`withdrawn`, `withdrawn_flagged`, `engaged`, `improving`, `brief`, `absent`) from the
-   teen's engagement status and attendance. *This is what runs on seeded demo data.*
-
-**Step 3 — Generate a grounded individual note** (`groundedIndividualNote` in `notegen.ts`), per teen,
-four at a time:
-
-- **Generate** — Claude drafts four sections plus goal signals, from that teen's transcript, their
-  goals, the session module, and a one-line participation summary built from Step 1.
-- **Verify** — every claim is checked independently:
-  - no evidence cited → `UNSUPPORTED`
-  - metric evidence only → `SUPPORTED` automatically (it's our own measured data)
-  - transcript evidence → a **second model call** judges whether the quotes substantiate the claim,
-    returning `SUPPORTED` / `UNSUPPORTED` / `UNCERTAIN`. Claims citing both are shown both, so a
-    sentence reconciling narrative with signal isn't penalised.
-
-**Step 4 — Risk scan.** `scanForRisk()` runs over the transcript and writes `RiskFlag` rows with a
-12-hour SLA. **This is a regex stub, not a clinical detector** — every flag's evidence is stamped
-`[SYNTHETIC STUB — not a clinical detection]`. The workflow around it is real; the detector waits on
-a signed-off clinical taxonomy.
-
-**Step 5 — Group note.** One session-level note generated from all members' summaries. It is
-aggregate prose; claim-level grounding rigor lives in the individual notes.
-
-**Step 6 — Finish.** Status → `READY`, plus a `session.processed` audit event.
-
-Note writes are destructive-then-recreate inside a transaction, and the pipeline refuses to write a
-note with zero sections rather than replacing real content with an empty record.
-
----
-
-## 8. Review and approval
-
-Notes land as `DRAFT` in the review console. The clinician edits sections, expands **Show evidence**
-to see each claim's source (`Grounded` / `Partial` / `Inferred`), dispositions any risk flag, and
-approves. Every save, attestation, disposition, and approval writes an `AuditEvent`.
-
-**What `approveNote()` actually enforces server-side — two gates, not three:**
-
-1. The note must have at least one section (an empty note can't be signed into a chart).
-2. There must be **no unresolved `ACUTE` risk flag** for that session and patient.
-
-**Grounding is advisory, not a hard block.** Ungrounded claims are surfaced and the clinician attests
-them; the signature is the clinician's single attestation. `approveGroupNote()` applies the same two
-gates, but any member's unresolved acute flag blocks the group note, since it describes the whole
-room.
-
-> Worth stating plainly, because the stricter reading is the intuitive one: this is **not** a
-> two-part grounding-and-safety gate. Earlier internal notes described approval as blocked by "no
-> ungrounded claims **and** no unresolved ACUTE risk flag," and that is not what the code does —
-> only the acute-flag gate is hard. The looser behaviour is deliberate and matches the open question
-> in `product-requirements.md` §14, where the trade-off is explicitly left to a clinician's
-> judgment. It is called out here so the discrepancy is not mistaken for an implementation bug.
-
-Approved notes are copied into whatever EHR the practice uses. There is no EHR integration.
-
----
-
-## 9. What is deliberately not built
-
-Stated plainly, because several are things a reader would reasonably assume:
-
-- **No audio recording or storage**, and therefore no batch transcription of recordings (§6).
-- **No real-time AI output** — no live prompts, no live risk detection.
-- **No authentication** beyond one shared site password; no roles, no ownership checks.
-- **No real risk detection** — regex stub, visibly labelled.
-- **No consent enforcement** — `ConsentRecord` is modeled but nothing checks it.
-- **No EHR integration, no treatment planning, no cohort assembly or scheduling automation.**
-- **No automatic pipeline trigger** — notes are generated on demand.
-- **No parent-facing surface.**
-- **No real PHI, anywhere.** Database, fixtures, and seeds are entirely synthetic, and the local
-  MySQL instance is test-data-only.
-
----
-
-## 10. Verification
-
-There is no test runner. Each stage has a `tsx` script that exercises it end-to-end against real
-services, run from `app/`:
-
-```bash
-pnpm tsx scripts/asr-test.ts        # Deepgram pre-recorded provider against a public sample clip
-pnpm tsx scripts/notegen-test.ts    # generate → verify → verdicts on a synthetic transcript
-pnpm tsx scripts/pipeline-test.ts   # full processSession() on the latest Tuesday session (limit 2)
-pnpm build                          # the only real typecheck gate
-```
