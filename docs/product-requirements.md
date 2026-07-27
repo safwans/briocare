@@ -317,10 +317,9 @@ information nor the assistance needed to identify who needs to be drawn in.
 
 ## 9. MVP Focus
 
-The MVP targets that pain directly: helping therapists see and act on declining participation.
+The MVP targets that pain directly: Helping therapists address drop in participation.
 
-Section 8 explains why participation drops — the therapist has no visibility into it, and no time to
-build any. The MVP attacks both halves of that. It makes participation visible as a per-teen signal
+The therapist has limited visibility into the group and no time to build any. The MVP attacks both halves of that. It makes participation visible as a per-teen signal
 trended between sessions, and it removes the documentation load that consumes the time needed to act
 on what the signal shows.
 
