@@ -77,8 +77,7 @@ The initial brief pointed toward the 6–12 group. Based on my research I favor 
 and within that group our beachhead is the **14–17** sub-band. Five reasons, in the order I weight
 them.
 
-**1. The group format fits teenagers developmentally.** Working out where you fit among peers and
-who you are relative to them is the central developmental task of adolescence. A therapy group works
+**1. The group format fits teenagers developmentally.** Fitting in with peers and figuring out who they are is central to being a teenager. A therapy group works
 with that instinct. For younger children, groups have to be built around structured activities and
 depend on the clinician to direct every moment, which means the format gives back far less leverage.
 
